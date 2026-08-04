@@ -4,13 +4,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository layout
 
-The working directory (`so3krates/`) is not itself a git repo. The actual code lives in the
-**`mlff/`** subdirectory, which is a clone of https://github.com/thorben-frank/mlff — this is
-where the git history, `.github/workflows/`, and all commands below apply. All paths in this
-file are relative to `mlff/` unless stated otherwise.
-
-`pc_RE_dgrad_5950_training_db.json` at the repo root is a large (~280MB) training database
-loadable with `mlatom`; it is data, not part of the `mlff` codebase.
+This repo (`SO3krates-ES`) is a fork of https://github.com/thorben-frank/mlff, remote `origin`.
+The original repo is kept as remote `upstream` for pulling future upstream fixes. All paths in
+this file are relative to this repo's root (which is also the `mlff` Python package's parent
+directory — i.e. the package itself lives at `mlff/` here, so import paths look like
+`mlff.nn...` while file paths look like `mlff/nn/...`).
 
 ## What this is
 
@@ -21,8 +19,6 @@ entry points, not a typical `import`-and-run library, though the model and poten
 fully usable from Python (see README's "Use `So3krates` in Python" section).
 
 ## Commands
-
-Run all commands from within `mlff/` (the package repo root).
 
 ```bash
 # Install (editable). Install jax/jaxlib matching your CUDA version FIRST — see mlff/README.md.
@@ -80,7 +76,7 @@ A local `.venv/` under `mlff/` is the expected place to develop; it is not commi
 
 ## Architecture
 
-### Package map (`mlff/mlff/`)
+### Package map (`mlff/`)
 
 - **`nn/`** — the model itself (Flax `linen` modules): `StackNet` assembly, layers, embeddings,
   observables. Go here to add an architecture, layer type, or output quantity.
@@ -207,26 +203,23 @@ full deep-dive on units, energy shifts, and hyperparameter flags like `--L`/`--F
 
 `z` may be given with shape `(n,)` instead of `(n_data, n)` if every structure shares the same
 atom ordering/composition — `mlff` detects the missing leading axis and repeats it (see
-`mlff/mlff/data/dataloader.py` warning "Detected missing data dimension (0-th axis) for z").
+`mlff/data/dataloader.py` warning "Detected missing data dimension (0-th axis) for z").
 
-### Using mlatom-prepared data (e.g. `mlatom` `.json` molecular databases)
+Data originating from `mlatom` (energies in Hartree, gradients in Hartree/Angstrom) can be
+converted to this `.npz` convention and trained with `--units energy=Hartree,force="Hartree/Angstrom"`
+(note the sign flip: mlff trains on forces = `-gradients`).
 
-This workspace also has an `mlatom` checkout at `/home/jakub/UK/AV/PROJECTS/mlatom/mlatom` that
-is **not** pip-installed into `mlff`'s venv. To `import mlatom` from any script/REPL, put its repo
-root on `PYTHONPATH`:
+### Multi-state (excited-state) energy/force prediction
 
-```bash
-export PYTHONPATH="/home/jakub/UK/AV/PROJECTS/mlatom/mlatom:$PYTHONPATH"
-```
-
-`mlatom.data.molecular_database.load(path, format='json')` gives molecules with `.energy` in
-**Hartree** and per-atom `.energy_gradients` in **Hartree/Angstrom** (`.xyz_coordinates` are
-already Angstrom). To train `mlff` on such data:
-
-1. Convert to an `.npz` with the default keys — `R` (Angstrom), `z`, `E` (leave in Hartree),
-   `F = -energy_gradients` (note the sign flip: mlff trains on forces, mlatom stores gradients).
-   See `convert_100_to_npz.py` at the repo root for a worked example (100-geometry, single-
-   molecule trajectory from `100.json` → `100_training_data.npz`).
-2. Train with `--units energy=Hartree,force="Hartree/Angstrom"` so `mlff` rescales into its
-   internal eV/Angstrom convention (`ase.units` supplies `Hartree`; `Angstrom == 1`, so the force
-   factor is just the Hartree→eV constant).
+`train_so3krates` supports predicting multiple electronic states (e.g. ground + excited states)
+from a single forward/backward pass via `--n_states N` (default `1`). The `energy`/`force`
+property keys then carry an extra leading state axis: `E` shaped `(n_data, N)`, `F` shaped
+`(n_data, N, n_atoms, 3)` — same keys, no new property names. This must come from a `.npz` file;
+ASE-readable formats have no native multi-state-energy convention. `jax.jacrev` over the
+`(N,)`-shaped energy output yields all `N` states' forces in one autodiff call
+(`nn/stacknet/observable_function.py::get_obs_and_force_fn`). `N` is fixed per checkpoint, like
+`--L`/`--F`/`--degrees`. Not supported together with `stress` in `--targets`, and
+`--shift_by atomic_number`/`lse` (only the default `--shift_by mean` supports multi-state
+energy shifting — see `DataSet.shift_x_by_mean_x` in `data/dataset.py`). Predicting
+non-adiabatic coupling vectors, and wiring multi-state predictions into `mdx` MD/dynamics (state
+selection, surface hopping), are not implemented. See `tests/test_multi_state.py`.
