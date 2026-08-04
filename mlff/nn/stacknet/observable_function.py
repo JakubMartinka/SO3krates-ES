@@ -144,7 +144,12 @@ def get_obs_and_force_fn(model: StackNet) -> ObservableFn:
     R_key = prop_keys['atomic_position']
     F_key = prop_keys['force']
 
-    D_force = (F_key, (E_key, R_key, lambda y: -y.squeeze(-3)))
+    def _neg_grad(y):
+        # y has shape (n_states, n, 3). For the common single-state case (n_states == 1) the
+        # leading axis is squeezed away to keep the force output shape (n, 3) as before.
+        return -y.squeeze(-3) if y.shape[-3] == 1 else -y
+
+    D_force = (F_key, (E_key, R_key, _neg_grad))
     obs_and_force_fn = get_obs_and_grad_obs_fn(model, derivatives=(D_force,))
     return obs_and_force_fn
 

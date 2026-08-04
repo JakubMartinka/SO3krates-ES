@@ -29,13 +29,23 @@ def scaled_safe_masked_mse_loss(y, y_true, scale, msk):
     return safe_mask(den > 0, lambda x: v.reshape(-1).sum() / x, den, 0)
 
 
-masks = {pn.energy: lambda u: jnp.ones(len(u)).astype(bool)[:, None],
-         pn.atomic_energy: lambda u: u[..., None],
-         pn.force: lambda u: u[..., None],
-         pn.stress: lambda u: jnp.ones(len(u)).astype(bool)[:, None, None],
-         pn.partial_charge: lambda u: u[..., None],
-         pn.hirshfeld_volume: lambda u: u[..., None],
-         pn.hirshfeld_volume_ratio: lambda u: u[..., None]
+def _force_mask(u, target_ndim):
+    """
+    Node mask `u` has shape (B, n_atoms). The force target is (B, n_atoms, 3) in the single-state
+    case, or (B, n_states, n_atoms, 3) for multi-state training. `extra` inserts the additional
+    middle (state) axes so the mask broadcasts correctly against either shape.
+    """
+    extra = target_ndim - u.ndim - 1
+    return u.reshape(u.shape[:1] + (1,) * extra + u.shape[1:] + (1,))
+
+
+masks = {pn.energy: lambda u, target_ndim=None: jnp.ones(len(u)).astype(bool)[:, None],
+         pn.atomic_energy: lambda u, target_ndim=None: u[..., None],
+         pn.force: _force_mask,
+         pn.stress: lambda u, target_ndim=None: jnp.ones(len(u)).astype(bool)[:, None, None],
+         pn.partial_charge: lambda u, target_ndim=None: u[..., None],
+         pn.hirshfeld_volume: lambda u, target_ndim=None: u[..., None],
+         pn.hirshfeld_volume_ratio: lambda u, target_ndim=None: u[..., None]
          }
 
 
@@ -59,7 +69,7 @@ def get_loss_fn(obs_fn: Callable, weights: Dict, prop_keys: Dict, scales: Dict =
             _l = scaled_safe_masked_mse_loss(y=outputs[name],
                                              y_true=targets[name],
                                              scale=_scales[name],
-                                             msk=_masks[name](inputs[prop_keys[pn.node_mask]])
+                                             msk=_masks[name](inputs[prop_keys[pn.node_mask]], targets[name].ndim)
                                              )
 
             loss += _weights[name] * _l

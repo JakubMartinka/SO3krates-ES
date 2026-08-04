@@ -33,12 +33,13 @@ def get_observable_module(name, h):
 
 class Energy(BaseSubModule):
     prop_keys: Dict
-    per_atom_scale: Sequence[float] = None
-    per_atom_shift: Sequence[float] = None
+    per_atom_scale: Sequence = None
+    per_atom_shift: Sequence = None
     num_embeddings: int = 100
     zbl_repulsion: bool = False
     zbl_repulsion_shift: float = 0.
     output_convention: str = 'per_structure'
+    n_states: int = 1
     module_name: str = 'energy'
 
     def setup(self):
@@ -47,14 +48,19 @@ class Energy(BaseSubModule):
         if self.output_convention == 'per_atom':
             self.atomic_energy_key = self.prop_keys[pn.atomic_energy]
 
+        def _take(arr):
+            def fn(y, *args, **kwargs):
+                taken = jnp.take(jnp.array(arr), y, axis=0)  # shape: (n) or (n,n_states)
+                return taken if taken.ndim > 1 else taken[:, None]  # shape: (n,1) or (n,n_states)
+            return fn
+
         if self.per_atom_scale is not None:
-            self.get_per_atom_scale = lambda y, *args, **kwargs: jnp.take(jnp.array(self.per_atom_scale), y)
-            # returns array, shape: (n)
+            self.get_per_atom_scale = _take(self.per_atom_scale)
         else:
             self.get_per_atom_scale = lambda *args, **kwargs: jnp.float32(1.)
 
         if self.per_atom_shift is not None:
-            self.get_per_atom_shift = lambda y, *args, **kwargs: jnp.take(jnp.array(self.per_atom_shift), y)
+            self.get_per_atom_shift = _take(self.per_atom_shift)
         else:
             self.get_per_atom_shift = lambda *args, **kwargs: jnp.float32(0.)
 
@@ -74,9 +80,9 @@ class Energy(BaseSubModule):
         point_mask = inputs['point_mask']
         z = inputs[self.atomic_type_key].astype(jnp.int16)
 
-        e_loc = MLP(features=[x.shape[-1], 1], activation_fn=silu)(x).squeeze(axis=-1)  # shape: (n)
-        e_loc = self.get_per_atom_scale(z) * e_loc + self.get_per_atom_shift(z)  # shape: (n)
-        e_loc = safe_scale(e_loc, scale=point_mask)  # shape: (n)
+        e_loc = MLP(features=[x.shape[-1], self.n_states], activation_fn=silu)(x)  # shape: (n,n_states)
+        e_loc = self.get_per_atom_scale(z) * e_loc + self.get_per_atom_shift(z)  # shape: (n,n_states)
+        e_loc = safe_scale(e_loc, scale=point_mask[:, None])  # shape: (n,n_states)
 
         if self.zbl_repulsion:
             e_rep = ZBLRepulsion(prop_keys=self.prop_keys,
@@ -86,9 +92,9 @@ class Energy(BaseSubModule):
             e_rep = jnp.asarray(0., dtype=e_loc.dtype)  # shape: (1)
 
         if self.output_convention == 'per_atom':
-            return {self.atomic_energy_key: e_loc[:, None] + e_rep}
+            return {self.atomic_energy_key: e_loc + e_rep}  # shape: (n,n_states)
         elif self.output_convention == 'per_structure':
-            return {self.energy_key: e_loc.sum(axis=-1, keepdims=True) + e_rep}
+            return {self.energy_key: e_loc.sum(axis=0) + e_rep}  # shape: (n_states)
         else:
             raise ValueError(f"{self.output_convention} is invalid argument for attribute `output_convention`.")
 
@@ -103,6 +109,7 @@ class Energy(BaseSubModule):
                                    'output_convention': self.output_convention,
                                    'zbl_repulsion': self.zbl_repulsion,
                                    'zbl_repulsion_shift': self.zbl_repulsion_shift,
+                                   'n_states': self.n_states,
                                    'prop_keys': self.prop_keys}
                 }
 

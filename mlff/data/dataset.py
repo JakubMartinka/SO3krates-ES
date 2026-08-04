@@ -36,9 +36,12 @@ class DataSet:
         # get n_data, kind of messy but best way I could think of
         q_data = {k: v for k, v in self.data.items()}
 
-        # if energy exists in data, make sure it has the correct dimensions
+        # if energy exists in data, make sure it has the correct dimensions. Energy arrays with
+        # more than one column already carry an explicit (n_data, n_states) shape (multi-state
+        # training) and must not be flattened.
         try:
-            q_data[self.prop_keys[pn.energy]] = q_data[self.prop_keys[pn.energy]].reshape(-1, 1)
+            e = q_data[self.prop_keys[pn.energy]]
+            q_data[self.prop_keys[pn.energy]] = e.reshape(-1, 1) if e.ndim == 1 else e
         except KeyError:
             pass
 
@@ -311,11 +314,20 @@ class DataSet:
             logging.warning(f'You already called `shift_x_by_mean` for `x={x}`. It is not shifted again.')
         else:
             p_key = self.prop_keys[x]
-            p_mean = self.data_split['train'][p_key].reshape(-1).mean()
-            self.data_split['train'][p_key] -= p_mean
-            self.data_split['valid'][p_key] -= p_mean
-            self.data_split['test'][p_key] -= p_mean
-            self.scales[x]['per_atom_shift'] = [0] + [p_mean / n_atoms] * 100
+            # per-state mean: shape (n_states,), which is (1,) in the (still default) single-state
+            # case, so this is numerically identical to the previous flatten-and-mean behavior.
+            p_mean = self.data_split['train'][p_key].mean(axis=0)
+            self.data_split['train'][p_key] = self.data_split['train'][p_key] - p_mean
+            self.data_split['valid'][p_key] = self.data_split['valid'][p_key] - p_mean
+            self.data_split['test'][p_key] = self.data_split['test'][p_key] - p_mean
+
+            per_atom = p_mean / n_atoms
+            if per_atom.shape == (1,):
+                shift_value = per_atom.item()
+                self.scales[x]['per_atom_shift'] = [0] + [shift_value] * 100
+            else:
+                shift_list = per_atom.tolist()
+                self.scales[x]['per_atom_shift'] = [[0.] * len(shift_list)] + [shift_list] * 100
             self.track_shift_x_by_mean_x += [x]
 
     def divide_x_by_std_y(self, x, y):
@@ -344,6 +356,12 @@ class DataSet:
             x_key = self.prop_keys[x]
             z_key = self.prop_keys[pn.atomic_type]
 
+            if self.data_split['train'][x_key].shape[-1] > 1:
+                raise NotImplementedError(
+                    'shift_x_by_type is not yet implemented for multi-state energies (n_states > 1). '
+                    'Use shift_by="mean" instead.'
+                )
+
             shifts_arr = np.zeros(int(max(list(shifts.keys()))) + 1)
             for k, v in shifts.items():
                 shifts_arr[k] = v
@@ -369,6 +387,12 @@ class DataSet:
         else:
             x_key = self.prop_keys[x]
             z_key = self.prop_keys[pn.atomic_type]
+
+            if self.data_split['train'][x_key].shape[-1] > 1:
+                raise NotImplementedError(
+                    'shift_x_by_type is not yet implemented for multi-state energies (n_states > 1). '
+                    'Use shift_by="mean" instead.'
+                )
 
             z = self.data_split['train'][z_key]
 

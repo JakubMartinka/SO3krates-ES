@@ -163,8 +163,17 @@ def evaluate():
         return scales[prop_keys_inv[_k]]['scale'] * _v
 
     def shift(_k, _v, _z):
-        shifts = np.array(scales[prop_keys_inv[_k]]['per_atom_shift'], np.float64)[_z.astype(int)].sum(axis=-1)  # shape: (B)
-        return _v + np.expand_dims(shifts, [i for i in range(1, _v.ndim)])
+        shift_arr = np.array(scales[prop_keys_inv[_k]]['per_atom_shift'], np.float64)
+        taken = shift_arr[_z.astype(int)]
+        if shift_arr.ndim == 1:
+            shifts = taken.sum(axis=-1)  # shape: (B)
+            return _v + np.expand_dims(shifts, [i for i in range(1, _v.ndim)])
+        # multi-state per_atom_shift, shape (101, n_states): sum only over the atom axis (axis 1
+        # of `taken`, shape (B, n_atoms, n_states)), keeping the state axis, which already
+        # matches `_v`'s state axis and must not be re-expanded.
+        shifts = taken.sum(axis=1)  # shape: (B, n_states)
+        extra = _v.ndim - shifts.ndim
+        return _v + shifts.reshape(shifts.shape + (1,) * extra)
 
     def scale_and_shift_fn(_x: Dict, _z: np.ndarray):
         return {_k: shift(_k, scale(_k, _v), _z) for (_k, _v) in _x.items()}

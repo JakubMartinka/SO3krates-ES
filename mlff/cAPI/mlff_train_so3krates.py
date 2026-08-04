@@ -89,6 +89,14 @@ def train_so3krates():
     parser.add_argument('--degrees', nargs='+', type=int, required=False, default=[1, 2, 3],
                         help='Degrees for the spherical harmonic coordinates.')
 
+    parser.add_argument('--n_states', type=int, required=False, default=1,
+                        help='Number of electronic states to predict simultaneously (e.g. ground + excited '
+                             'states). When > 1, energy and force are predicted for every state from a single '
+                             'forward/backward pass. Requires `--data_file` to be a `.npz` with `E` shaped '
+                             '(n_data, n_states) and `F` shaped (n_data, n_states, n_atoms, 3) — ASE-readable '
+                             'formats have no native multi-state-energy convention. Not supported together with '
+                             '`stress` in `--targets`.')
+
     parser.add_argument('--so3krates_layer_kwargs', type=json.loads, required=False, default=None,
                         metavar='{"key": value, "key1": value1, ...}',
                         help='Additional options for SO3krates layer.'
@@ -211,6 +219,7 @@ def train_so3krates():
     F = args.F
     L = args.L
     degrees = args.degrees
+    n_states = args.n_states
 
     eval_every_t = args.eval_every_t
     use_wandb = args.use_wandb
@@ -362,13 +371,16 @@ def train_so3krates():
     if args.geometry_embed_kwargs is not None:
         geometry_embed_kwargs.update(args.geometry_embed_kwargs)
 
-    obs = [Energy(prop_keys=prop_keys, zbl_repulsion=args.zbl_repulsion)]
+    obs = [Energy(prop_keys=prop_keys, zbl_repulsion=args.zbl_repulsion, n_states=n_states)]
     net = So3krates(prop_keys=prop_keys,
                     F=F,
                     n_layer=L,
                     obs=obs,
                     geometry_embed_kwargs=geometry_embed_kwargs,
                     so3krates_layer_kwargs=so3krates_layer_kwargs)
+
+    if pn.stress in targets and n_states > 1:
+        raise ValueError('Multi-state training (`--n_states` > 1) does not support `stress` as a target.')
 
     if pn.force in targets:
         if pn.stress in targets:
