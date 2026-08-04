@@ -289,8 +289,10 @@ class DataSet:
             idx = idx_all[:n_train + n_valid]
             idx_valid, idx_train = np.split(idx, indices_or_sections=[n_valid])
 
-        # set sorts the indices, so we have to permute them again
-        idx_test = np.array(list(set(idx_all) - set(idx_train) - set(idx_valid)))
+        # set sorts the indices, so we have to permute them again. dtype=int is needed since an
+        # empty list (n_train + n_valid == n_data) would otherwise default to float64, which
+        # cannot be used for indexing below.
+        idx_test = np.array(list(set(idx_all) - set(idx_train) - set(idx_valid)), dtype=int)
         test_perm = np.random.RandomState(seed).permutation(len(idx_test))
         idx_test = idx_test[test_perm][:n_test]  # array[:None] returns all elements of array
 
