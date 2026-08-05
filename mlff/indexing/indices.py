@@ -76,7 +76,7 @@ def get_indices(R: np.ndarray, z: np.ndarray, r_cut: float, cell: np.ndarray = N
         u, l = t
         return np.pad(u, ((0, 0), (0, int(l))), mode='constant', constant_values=((0, 0), (0, -1)))
 
-    pad_idx_i, pad_idx_j = map(np.squeeze,
+    pad_idx_i, pad_idx_j = map(partial(np.squeeze, axis=-2),
                                np.split(np.array(list(map(pad_idxs, zip(idxs, pad_length)))),
                                         indices_or_sections=2,
                                         axis=-2))
