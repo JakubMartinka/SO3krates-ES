@@ -271,6 +271,11 @@ def run_training(state: TrainState,
             if stop_metric_fn is not None:
                 if stop_metric_fn(valid_batch_metrics_np):
                     logging.info(f'Stopping criteria for metrics has been met for step {i}.')
+                    # mngr.save() above is async (AsyncCheckpointer) -- without waiting for it to
+                    # finish, exit() raises SystemExit and unwinds past the mngr.wait_until_finished()
+                    # call at the end of this function, so a caller catching SystemExit and
+                    # immediately reloading the checkpoint can race an incomplete/partial write.
+                    mngr.wait_until_finished()
                     exit()
 
         epoch_end = time.time()
@@ -309,6 +314,8 @@ def run_training(state: TrainState,
             if stop_lr_fn is not None:
                 if stop_lr_fn(abs(lr)):
                     logging.info(f'Stopping criteria for learning rate has been met for step {i}.')
+                    # see the matching comment above stop_metric_fn's exit() -- same race.
+                    mngr.wait_until_finished()
                     exit()
 
             if (i > 1) and (i % log_every_t == 0):
