@@ -49,7 +49,17 @@ masks = {pn.energy: lambda u, target_ndim=None: jnp.ones(len(u)).astype(bool)[:,
          }
 
 
-def get_loss_fn(obs_fn: Callable, weights: Dict, prop_keys: Dict, scales: Dict = None):
+def get_loss_fn(obs_fn: Callable, weights: Dict, prop_keys: Dict, scales: Dict = None, gap_weight: float = None):
+    """
+    Args:
+        gap_weight (float, optional): if given, adds an extra MSE term on adjacent-state energy
+            gaps (`E[..., s+1] - E[..., s]` for every `s`), on top of the per-property losses
+            over `weights`. Meant for multi-state (`n_states > 1`) training, where independent
+            per-state energy heads are not otherwise encouraged to have correlated errors, so the
+            gap (predicted minus true) can be noisier than either state's own energy error --
+            this term supervises the gap directly. No-op if `pn.energy` is not in `weights`, or
+            if the energy target only has one state (nothing to take a gap of).
+    """
     _weights = {prop_keys[k]: v for (k, v) in weights.items()}
     if scales is None:
         _scales = {prop_keys[k]: jnp.ones(1) for (k, _) in weights.items()}
@@ -57,6 +67,7 @@ def get_loss_fn(obs_fn: Callable, weights: Dict, prop_keys: Dict, scales: Dict =
         _scales = scales
 
     _masks = {prop_keys[k]: masks[k] for k in weights.keys()}
+    _energy_key = prop_keys.get(pn.energy)
 
     # _with_stress = pn.stress in list(weights.keys())
 
@@ -74,6 +85,16 @@ def get_loss_fn(obs_fn: Callable, weights: Dict, prop_keys: Dict, scales: Dict =
 
             loss += _weights[name] * _l
             train_metrics.update({name: _l / _scales[name].mean()})
+
+        if gap_weight is not None and _energy_key is not None and _energy_key in targets \
+                and targets[_energy_key].shape[-1] > 1:
+            e_pred, e_true = outputs[_energy_key], targets[_energy_key]  # shape (B, n_states)
+            gap_pred = e_pred[..., 1:] - e_pred[..., :-1]  # adjacent-state gaps: (B, n_states - 1)
+            gap_true = e_true[..., 1:] - e_true[..., :-1]
+            gap_mask = _masks[_energy_key](inputs[prop_keys[pn.node_mask]], e_true.ndim)
+            _gap_l = scaled_safe_masked_mse_loss(y=gap_pred, y_true=gap_true, scale=jnp.ones(1), msk=gap_mask)
+            loss += gap_weight * _gap_l
+            train_metrics.update({'gap': _gap_l})
 
         loss = jnp.reshape(loss, ())
         train_metrics.update({'loss': loss})
