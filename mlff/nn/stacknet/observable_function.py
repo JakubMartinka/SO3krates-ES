@@ -154,6 +154,26 @@ def get_obs_and_force_fn(model: StackNet) -> ObservableFn:
     return obs_and_force_fn
 
 
+def nac_from_scaled_coupling(h: jnp.ndarray, energy: jnp.ndarray, eps: float = 1e-3) -> jnp.ndarray:
+    """
+    Recover the (raw, possibly divergent-near-degeneracy) nonadiabatic coupling vector from the
+    smooth, network-predicted scaled coupling `h = NAC * (E_1 - E_0)` (see `nn.InterstateCoupling`)
+    and a two-state energy prediction.
+
+    Args:
+        h (Array): Predicted scaled coupling, shape (..., n_atoms, 3).
+        energy (Array): Two-state energy prediction, shape (..., 2).
+        eps (float): Floor on the magnitude of the (signed) predicted gap before dividing, so a
+            near-zero or exactly-zero predicted gap does not blow up or NaN the result.
+
+    Returns: The recovered NAC vector, shape (..., n_atoms, 3).
+
+    """
+    gap = energy[..., 1] - energy[..., 0]  # shape: (...)
+    safe_gap = jnp.where(gap >= 0, jnp.maximum(gap, eps), jnp.minimum(gap, -eps))  # shape: (...)
+    return h / safe_gap[..., None, None]
+
+
 def get_energy_force_stress_fn(model: StackNet):
     """
     Create an energy, force and stress function.

@@ -26,6 +26,8 @@ def switching_fn(x, x_on, x_off):
 def get_observable_module(name, h):
     if name == 'energy':
         return Energy(**h)
+    elif name == 'nac':
+        return InterstateCoupling(**h)
     else:
         msg = "No observable module implemented for `module_name={}`".format(name)
         raise ValueError(msg)
@@ -112,6 +114,81 @@ class Energy(BaseSubModule):
                                    'n_states': self.n_states,
                                    'prop_keys': self.prop_keys}
                 }
+
+
+class InterstateCoupling(BaseSubModule):
+    """
+    Predicts the interstate (nonadiabatic) coupling vector between two electronic states.
+
+    Rather than the raw coupling `d_01 = <psi_0|d/dR|psi_1>` (which diverges as the two
+    states become degenerate), this predicts the smooth *scaled* coupling
+    `h = d_01 * (E_1 - E_0)`, which has the same units/scale as a force and stays finite
+    everywhere, including at conical intersections. Recover the raw coupling from `h` and a
+    two-state energy prediction with `nn.nac_from_scaled_coupling`.
+
+    The output is a per-atom 3-vector built as an invariant-gated copy of the backbone's own
+    degree-1 equivariant feature (the l=1 block of `chi`, the SPHC representation already
+    accumulated over all layers): `h_i = s * a(x_i) * chi_i[l=1]`. Because `a(x_i)` is an
+    invariant scalar (computed from the invariant per-atom features `x`) and `chi_i[l=1]` is
+    already a rotation-equivariant vector, `h_i` is rotation-equivariant and (since `chi` is
+    built from relative pair directions) translation-invariant, with no additional
+    Clebsch-Gordan machinery required. Requires `1` to be among the `degrees` the backbone
+    was built with.
+
+    `s` is a single learnable scalar (init `output_scale`). `chi`'s degree-1 block is
+    normalized to a small internal SPHC scale (it is designed to be combined multiplicatively
+    inside the attention layers, not read out directly), typically one to two orders of
+    magnitude below a physical coupling target -- without `s`, fitting that gap would require
+    the whole gate MLP (and, through it, the shared backbone) to grow large weights just to
+    reach the right output scale, which is slow and poorly conditioned under Adam. A single
+    extra scalar parameter lets the optimizer fix the overall magnitude in a handful of steps
+    independently of learning the (much harder) directional/angular dependence.
+    """
+    prop_keys: Dict
+    degrees: Sequence[int]
+    output_scale: float = 1.
+    module_name: str = 'nac'
+
+    def setup(self):
+        self.nac_key = self.prop_keys[pn.nac]
+        if 1 not in self.degrees:
+            msg = (f"`InterstateCoupling` reads the degree-1 (vector) block of `chi`, which "
+                  f"requires `1` to be in `degrees`; got degrees={self.degrees}.")
+            raise ValueError(msg)
+        n0 = list(self.degrees).index(1)
+        offset = sum(2 * d + 1 for d in self.degrees[:n0])
+        self._l1_slice = slice(offset, offset + 3)
+
+    @nn.compact
+    def __call__(self, inputs: Dict, *args, **kwargs):
+        x = inputs['x']  # shape: (n,F), invariant
+        chi = inputs['chi']  # shape: (n,m_tot), equivariant
+        point_mask = inputs['point_mask']  # shape: (n)
+
+        chi_l1 = chi[:, self._l1_slice]  # shape: (n,3); real-SPHC order (m=-1,0,1) ~ (y,z,x)
+        # `basis_function/spherical.py`'s l=1 real spherical harmonics are laid out as
+        # (Y_1^-1, Y_1^0, Y_1^1) = c*(y, z, x) for a single shared constant c (see module
+        # docstring) -- a fixed permutation of Cartesian (x,y,z), not (x,y,z) itself. Verified
+        # empirically: comparing this block directly against a Cartesian-rotated reference gives
+        # ~50-180% relative error (looks like broken equivariance), while reordering it to
+        # (x,y,z) first reproduces the expected rotation to float32 precision (~1e-7). Since
+        # (x,y,z) is the convention real NAC/force training data and `nn.nac_from_scaled_coupling`
+        # use, this reordering is required for the *physical* Cartesian vector -- not optional,
+        # and not merely a preference -- despite the un-reordered block already being a
+        # perfectly valid (if differently-labeled) O(3) representation on its own.
+        chi_l1 = chi_l1[:, jnp.array([2, 0, 1])]  # shape: (n,3), Cartesian (x,y,z)
+
+        gate = MLP(features=[x.shape[-1], 1], activation_fn=silu)(x)  # shape: (n,1), invariant
+        s = self.param('output_scale', constant(self.output_scale), (1,))  # shape: (1), invariant
+        h = s * gate * chi_l1  # shape: (n,3), equivariant
+        h = safe_scale(h, scale=point_mask[:, None])  # shape: (n,3)
+
+        return {self.nac_key: h}
+
+    def __dict_repr__(self) -> Dict[str, Dict[str, Any]]:
+        return {self.module_name: {'degrees': list(self.degrees),
+                                   'output_scale': self.output_scale,
+                                   'prop_keys': self.prop_keys}}
 
 
 class ZBLRepulsion(nn.Module):

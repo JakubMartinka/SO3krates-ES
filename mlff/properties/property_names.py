@@ -1,5 +1,6 @@
 energy = 'energy'
 force = 'force'
+nac = 'nac'  # scaled interstate coupling h = NAC * (E_1 - E_0), shape (n_atoms, 3); see nn.InterstateCoupling
 hirshfeld_volume = 'hirshfeld_volume'
 hirshfeld_volume_ratio = 'hirshfeld_volume_ratio'
 partial_charge = 'partial_charge'
