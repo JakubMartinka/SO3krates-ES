@@ -143,14 +143,27 @@ class InterstateCoupling(BaseSubModule):
     reach the right output scale, which is slow and poorly conditioned under Adam. A single
     extra scalar parameter lets the optimizer fix the overall magnitude in a handful of steps
     independently of learning the (much harder) directional/angular dependence.
+
+    If `use_grad_diff` is set, an additional per-atom vector input (`prop_keys[pn.grad_diff]`,
+    the gradient-difference vector dE_1/dR - dE_0/dR) is read and combined with the backbone
+    term via its own independent invariant gate and learnable scale: `h_i = s*a(x_i)*chi_i[l=1]
+    + s2*a2(x_i, |g_i|)*g_i`. `g` is already a genuine Cartesian per-atom vector (unlike `chi`'s
+    l=1 block, which needs the reordering below), so it is used as-is; its norm is an invariant
+    scalar fed into the second gate alongside `x`. This is intended as an oracle/diagnostic
+    input (true ab-initio gradients, not a network prediction) to test whether gradient
+    information helps NAC fitting near conical intersections before committing to a real
+    gradient-predicting model to supply it at inference time.
     """
     prop_keys: Dict
     degrees: Sequence[int]
     output_scale: float = 1.
     module_name: str = 'nac'
+    use_grad_diff: bool = False
 
     def setup(self):
         self.nac_key = self.prop_keys[pn.nac]
+        if self.use_grad_diff:
+            self.grad_diff_key = self.prop_keys[pn.grad_diff]
         if 1 not in self.degrees:
             msg = (f"`InterstateCoupling` reads the degree-1 (vector) block of `chi`, which "
                   f"requires `1` to be in `degrees`; got degrees={self.degrees}.")
@@ -181,6 +194,15 @@ class InterstateCoupling(BaseSubModule):
         gate = MLP(features=[x.shape[-1], 1], activation_fn=silu)(x)  # shape: (n,1), invariant
         s = self.param('output_scale', constant(self.output_scale), (1,))  # shape: (1), invariant
         h = s * gate * chi_l1  # shape: (n,3), equivariant
+
+        if self.use_grad_diff:
+            g = inputs[self.grad_diff_key]  # shape: (n,3), Cartesian, equivariant
+            g_norm = jnp.linalg.norm(g, axis=-1, keepdims=True)  # shape: (n,1), invariant
+            gate2 = MLP(features=[x.shape[-1], 1], activation_fn=silu)(
+                jnp.concatenate([x, g_norm], axis=-1))  # shape: (n,1), invariant
+            s2 = self.param('grad_diff_scale', constant(self.output_scale), (1,))  # shape: (1)
+            h = h + s2 * gate2 * g  # shape: (n,3), equivariant
+
         h = safe_scale(h, scale=point_mask[:, None])  # shape: (n,3)
 
         return {self.nac_key: h}
@@ -188,6 +210,7 @@ class InterstateCoupling(BaseSubModule):
     def __dict_repr__(self) -> Dict[str, Dict[str, Any]]:
         return {self.module_name: {'degrees': list(self.degrees),
                                    'output_scale': self.output_scale,
+                                   'use_grad_diff': self.use_grad_diff,
                                    'prop_keys': self.prop_keys}}
 
 

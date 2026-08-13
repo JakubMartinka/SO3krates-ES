@@ -3,6 +3,7 @@ from .property_names import *
 md17_property_keys = {energy: 'E',
                       force: 'F',
                       nac: 'nac',
+                      grad_diff: 'grad_diff',
                       atomic_position: 'R',
                       atomic_type: 'z',
                       idx_i: 'idx_i',
