@@ -14,4 +14,5 @@ from .embed import (AtomTypeEmbed,
 
 from .observable import (Energy,
                          InterstateCoupling,
+                         InterstateCouplingPotential,
                          ZBLRepulsion)

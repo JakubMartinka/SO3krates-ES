@@ -124,7 +124,7 @@ def get_obs_and_grad_obs_fn(model: StackNet, derivatives: Tuple[Derivative] = No
         return lambda p, x: merge_dicts(obs_fn(p, x), obs_grad_fn(p, x))
 
 
-def get_obs_and_force_fn(model: StackNet) -> ObservableFn:
+def get_obs_and_force_fn(model: StackNet, nac_from_potential: bool = False) -> ObservableFn:
     """
     Get an observable function from a `StackNet` that returns all direct observables and the force. For the force
     function to exist, the `StackNet` must take the atomic coordinates as input and return the energy as observable.
@@ -135,6 +135,11 @@ def get_obs_and_force_fn(model: StackNet) -> ObservableFn:
 
     Args:
         model (StackNet): An initialized `StackNet`.
+        nac_from_potential (bool): Additionally derive the nonadiabatic coupling as the position
+            gradient of the invariant scalar emitted by `nn.InterstateCouplingPotential`, in the
+            same way the force is derived from the energy. Requires that module to be among the
+            model's observables. See its docstring for why one would want this over
+            `nn.InterstateCoupling`'s direct vector readout.
 
     Returns: An observable function.
 
@@ -149,9 +154,16 @@ def get_obs_and_force_fn(model: StackNet) -> ObservableFn:
         # leading axis is squeezed away to keep the force output shape (n, 3) as before.
         return -y.squeeze(-3) if y.shape[-3] == 1 else -y
 
-    D_force = (F_key, (E_key, R_key, _neg_grad))
-    obs_and_force_fn = get_obs_and_grad_obs_fn(model, derivatives=(D_force,))
-    return obs_and_force_fn
+    derivatives = ((F_key, (E_key, R_key, _neg_grad)),)
+    if nac_from_potential:
+        # The coupling potential is a single scalar (shape (1)), so its position gradient comes
+        # back as (1, n, 3); squeeze the leading axis to get the (n, 3) coupling vector. No sign
+        # flip -- unlike the force, the coupling's overall sign is an arbitrary wavefunction
+        # phase anyway (which is what `sign_invariant_targets` in the loss exists for).
+        derivatives += ((prop_keys['nac'], (prop_keys['nac_potential'], R_key,
+                                            lambda y: y.squeeze(-3))),)
+
+    return get_obs_and_grad_obs_fn(model, derivatives=derivatives)
 
 
 def nac_from_scaled_coupling(h: jnp.ndarray, energy: jnp.ndarray, eps: float = 1e-3) -> jnp.ndarray:

@@ -77,9 +77,34 @@ def get_loss_fn(obs_fn: Callable,
                 prop_keys: Dict,
                 scales: Dict = None,
                 gap_weight: float = None,
-                sign_invariant_targets: Sequence[str] = ()):
+                sign_invariant_targets: Sequence[str] = (),
+                sample_weighted_targets: Sequence[str] = (),
+                sample_weight_key: str = None):
     """
     Args:
+        sample_weighted_targets (Sequence[str], optional): property names (e.g. `pn.nac`) whose
+            per-property loss should be a *weighted* mean over the batch, with one weight per
+            training example read from `inputs[prop_keys[sample_weight_key]]`, instead of the
+            plain mean. Requires `sample_weight_key`.
+
+            Motivation (nonadiabatic couplings): the network is trained on the smooth scaled
+            coupling `h = NAC * (E_1 - E_0)`, but the physically used quantity is `NAC = h/gap`.
+            A plain MSE on `h` spends its budget uniformly, which yields a roughly *constant
+            relative* error on `h` across the dataset -- and therefore an error on `NAC` that
+            grows like `1/gap`, i.e. is worst exactly at the near-conical-intersection
+            geometries where `NAC` is largest and matters most. Weighting example `n` by
+            `1/(gap_n^2 + delta^2)` turns the `h` loss into an MSE on `NAC` with a floor
+            `delta` on the gap, putting the error where it belongs; weighting the other way
+            (down-weighting the smallest gaps) instead treats those points as ill-conditioned
+            reference data. Which of the two is wanted is a modelling choice, so this only
+            provides the mechanism -- the weights themselves are computed from the true
+            energies upstream and passed in as data.
+
+            The weighted mean is normalized by the batch's own weight sum, so the overall loss
+            scale (and hence a usable learning rate) does not depend on how the weights are
+            normalized globally.
+        sample_weight_key (str, optional): key into `prop_keys` naming the per-example weight
+            array, shape (B,) or (B,1). Required if `sample_weighted_targets` is non-empty.
         gap_weight (float, optional): if given, adds an extra MSE term on adjacent-state energy
             gaps (`E[..., s+1] - E[..., s]` for every `s`), on top of the per-property losses
             over `weights`. Meant for multi-state (`n_states > 1`) training, where independent
@@ -111,6 +136,10 @@ def get_loss_fn(obs_fn: Callable,
     _masks = {prop_keys[k]: masks[k] for k in weights.keys()}
     _energy_key = prop_keys.get(pn.energy)
     _sign_invariant_keys = {prop_keys[k] for k in sign_invariant_targets if k in weights}
+    _sample_weighted_keys = {prop_keys[k] for k in sample_weighted_targets if k in weights}
+    if _sample_weighted_keys and sample_weight_key is None:
+        raise ValueError('`sample_weighted_targets` requires `sample_weight_key` to be set.')
+    _sample_weight_key = prop_keys[sample_weight_key] if sample_weight_key is not None else None
 
     # _with_stress = pn.stress in list(weights.keys())
 
@@ -121,12 +150,26 @@ def get_loss_fn(obs_fn: Callable,
         train_metrics = {}
         for name, target in targets.items():  # name is the value in prop_keys
             msk = _masks[name](inputs[prop_keys[pn.node_mask]], targets[name].ndim)
+            _weighted = name in _sample_weighted_keys
             if name in _sign_invariant_keys:
                 _err_pos = _per_example_masked_mse(y=outputs[name], y_true=target, scale=_scales[name], msk=msk)
                 _err_neg = _per_example_masked_mse(y=outputs[name], y_true=-target, scale=_scales[name], msk=msk)
-                _l = jnp.minimum(_err_pos, _err_neg).mean()
+                _per_example = jnp.minimum(_err_pos, _err_neg)
+            elif _weighted:
+                _per_example = _per_example_masked_mse(y=outputs[name], y_true=target, scale=_scales[name], msk=msk)
             else:
+                _per_example = None
+
+            if _per_example is None:
                 _l = scaled_safe_masked_mse_loss(y=outputs[name], y_true=target, scale=_scales[name], msk=msk)
+            elif _weighted:
+                w = inputs[_sample_weight_key].reshape(-1)  # shape: (B)
+                # Weights are non-negative, so clamping the denominator is enough to keep both
+                # the value and its gradient finite if a whole batch happens to be zero-weighted
+                # (possible with a 'capped' weighting whose floor excludes every example in it).
+                _l = (w * _per_example).sum() / jnp.maximum(w.sum(), 1e-8)
+            else:
+                _l = _per_example.mean()
 
             loss += _weights[name] * _l
             train_metrics.update({name: _l / _scales[name].mean()})

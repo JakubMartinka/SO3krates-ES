@@ -28,6 +28,8 @@ def get_observable_module(name, h):
         return Energy(**h)
     elif name == 'nac':
         return InterstateCoupling(**h)
+    elif name == 'nac_potential':
+        return InterstateCouplingPotential(**h)
     else:
         msg = "No observable module implemented for `module_name={}`".format(name)
         raise ValueError(msg)
@@ -126,14 +128,40 @@ class InterstateCoupling(BaseSubModule):
     everywhere, including at conical intersections. Recover the raw coupling from `h` and a
     two-state energy prediction with `nn.nac_from_scaled_coupling`.
 
-    The output is a per-atom 3-vector built as an invariant-gated copy of the backbone's own
-    degree-1 equivariant feature (the l=1 block of `chi`, the SPHC representation already
-    accumulated over all layers): `h_i = s * a(x_i) * chi_i[l=1]`. Because `a(x_i)` is an
-    invariant scalar (computed from the invariant per-atom features `x`) and `chi_i[l=1]` is
-    already a rotation-equivariant vector, `h_i` is rotation-equivariant and (since `chi` is
-    built from relative pair directions) translation-invariant, with no additional
-    Clebsch-Gordan machinery required. Requires `1` to be among the `degrees` the backbone
-    was built with.
+    The output is a per-atom 3-vector. `readout` selects how it is built:
+
+    - `'chi'` (default, and what earlier checkpoints used): an invariant-gated copy of the
+      backbone's own degree-1 equivariant feature (the l=1 block of `chi`, the SPHC
+      representation already accumulated over all layers), `h_i = s * a(x_i) * chi_i[l=1]`.
+      Because `a(x_i)` is an invariant scalar (computed from the invariant per-atom features
+      `x`) and `chi_i[l=1]` is already a rotation-equivariant vector, `h_i` is
+      rotation-equivariant and (since `chi` is built from relative pair directions)
+      translation-invariant, with no additional Clebsch-Gordan machinery required. Requires
+      `1` to be among the `degrees` the backbone was built with.
+
+      **`chi` carries only one channel per degree**, so this form leaves the *direction* of
+      `h_i` fully determined by the geometry -- the network can only choose a signed magnitude,
+      i.e. one learnable degree of freedom per atom for a three-degree-of-freedom target. On
+      this project's fulvene data that caps the achievable R^2 on `h` at ~0.97 (measured by
+      projecting the reference coupling onto the trained model's own `chi[l=1]` directions),
+      which is also roughly where a fully trained `'chi'` model lands.
+
+    - `'pair'`: a message-passing vector readout that removes that cap,
+      `h_i = s * sum_j c_ij * phi_r_cut_ij * unit_r_ij`, where `c_ij` is an invariant scalar
+      from an MLP over `(x_i + x_j, x_i * x_j, rbf_ij)`. Since a real molecule has many
+      neighbours per atom, `{unit_r_ij}_j` spans all of R^3 and the head can point `h_i`
+      anywhere. Every ingredient of `c_ij` is *symmetric* under `i <-> j` by construction,
+      while `unit_r_ji = -unit_r_ij`, so `sum_i h_i = 0` holds exactly -- the translational
+      sum rule that a true nonadiabatic coupling obeys (this dataset's reference couplings
+      satisfy it to ~0.4% median, whereas a trained `'chi'` head violates it by ~11%).
+
+    - `'chi+pair'`: the sum of both terms, each with its own learnable scale.
+
+    `enforce_sum_rule` additionally projects out any residual net translation
+    (`h_i <- h_i - mean_j h_j` over the real, non-padded atoms). It is a no-op up to floating
+    point for `'pair'`, and is what makes `'chi'`/`'chi+pair'` satisfy the sum rule too. It
+    defaults to `False` so that checkpoints written before this option existed keep
+    reproducing their original predictions when reloaded.
 
     `s` is a single learnable scalar (init `output_scale`). `chi`'s degree-1 block is
     normalized to a small internal SPHC scale (it is designed to be combined multiplicatively
@@ -159,41 +187,77 @@ class InterstateCoupling(BaseSubModule):
     output_scale: float = 1.
     module_name: str = 'nac'
     use_grad_diff: bool = False
+    readout: str = 'chi'
+    enforce_sum_rule: bool = False
 
     def setup(self):
         self.nac_key = self.prop_keys[pn.nac]
         if self.use_grad_diff:
             self.grad_diff_key = self.prop_keys[pn.grad_diff]
-        if 1 not in self.degrees:
-            msg = (f"`InterstateCoupling` reads the degree-1 (vector) block of `chi`, which "
-                  f"requires `1` to be in `degrees`; got degrees={self.degrees}.")
+        if self.readout not in ('chi', 'pair', 'chi+pair'):
+            msg = (f"`InterstateCoupling.readout` must be one of 'chi', 'pair', 'chi+pair'; "
+                   f"got {self.readout!r}.")
             raise ValueError(msg)
-        n0 = list(self.degrees).index(1)
-        offset = sum(2 * d + 1 for d in self.degrees[:n0])
-        self._l1_slice = slice(offset, offset + 3)
+        self._use_chi = 'chi' in self.readout
+        self._use_pair = 'pair' in self.readout
+        if self._use_chi:
+            if 1 not in self.degrees:
+                msg = (f"`InterstateCoupling` with readout={self.readout!r} reads the degree-1 "
+                      f"(vector) block of `chi`, which requires `1` to be in `degrees`; got "
+                      f"degrees={self.degrees}.")
+                raise ValueError(msg)
+            n0 = list(self.degrees).index(1)
+            offset = sum(2 * d + 1 for d in self.degrees[:n0])
+            self._l1_slice = slice(offset, offset + 3)
 
     @nn.compact
     def __call__(self, inputs: Dict, *args, **kwargs):
         x = inputs['x']  # shape: (n,F), invariant
-        chi = inputs['chi']  # shape: (n,m_tot), equivariant
         point_mask = inputs['point_mask']  # shape: (n)
 
-        chi_l1 = chi[:, self._l1_slice]  # shape: (n,3); real-SPHC order (m=-1,0,1) ~ (y,z,x)
-        # `basis_function/spherical.py`'s l=1 real spherical harmonics are laid out as
-        # (Y_1^-1, Y_1^0, Y_1^1) = c*(y, z, x) for a single shared constant c (see module
-        # docstring) -- a fixed permutation of Cartesian (x,y,z), not (x,y,z) itself. Verified
-        # empirically: comparing this block directly against a Cartesian-rotated reference gives
-        # ~50-180% relative error (looks like broken equivariance), while reordering it to
-        # (x,y,z) first reproduces the expected rotation to float32 precision (~1e-7). Since
-        # (x,y,z) is the convention real NAC/force training data and `nn.nac_from_scaled_coupling`
-        # use, this reordering is required for the *physical* Cartesian vector -- not optional,
-        # and not merely a preference -- despite the un-reordered block already being a
-        # perfectly valid (if differently-labeled) O(3) representation on its own.
-        chi_l1 = chi_l1[:, jnp.array([2, 0, 1])]  # shape: (n,3), Cartesian (x,y,z)
+        h = jnp.zeros((x.shape[0], 3), dtype=x.dtype)  # shape: (n,3), equivariant
 
-        gate = MLP(features=[x.shape[-1], 1], activation_fn=silu)(x)  # shape: (n,1), invariant
-        s = self.param('output_scale', constant(self.output_scale), (1,))  # shape: (1), invariant
-        h = s * gate * chi_l1  # shape: (n,3), equivariant
+        if self._use_chi:
+            chi = inputs['chi']  # shape: (n,m_tot), equivariant
+            chi_l1 = chi[:, self._l1_slice]  # shape: (n,3); real-SPHC order (m=-1,0,1) ~ (y,z,x)
+            # `basis_function/spherical.py`'s l=1 real spherical harmonics are laid out as
+            # (Y_1^-1, Y_1^0, Y_1^1) = c*(y, z, x) for a single shared constant c (see module
+            # docstring) -- a fixed permutation of Cartesian (x,y,z), not (x,y,z) itself. Verified
+            # empirically: comparing this block directly against a Cartesian-rotated reference gives
+            # ~50-180% relative error (looks like broken equivariance), while reordering it to
+            # (x,y,z) first reproduces the expected rotation to float32 precision (~1e-7). Since
+            # (x,y,z) is the convention real NAC/force training data and `nn.nac_from_scaled_coupling`
+            # use, this reordering is required for the *physical* Cartesian vector -- not optional,
+            # and not merely a preference -- despite the un-reordered block already being a
+            # perfectly valid (if differently-labeled) O(3) representation on its own.
+            chi_l1 = chi_l1[:, jnp.array([2, 0, 1])]  # shape: (n,3), Cartesian (x,y,z)
+
+            gate = MLP(features=[x.shape[-1], 1], activation_fn=silu)(x)  # shape: (n,1), invariant
+            s = self.param('output_scale', constant(self.output_scale), (1,))  # shape: (1), invariant
+            h = h + s * gate * chi_l1  # shape: (n,3), equivariant
+
+        if self._use_pair:
+            idx_i = inputs[self.prop_keys[pn.idx_i]]  # shape: (P)
+            idx_j = inputs[self.prop_keys[pn.idx_j]]  # shape: (P)
+            pair_mask = inputs['pair_mask']  # shape: (P)
+            rbf_ij = inputs['rbf_ij']  # shape: (P,K), invariant
+            phi_r_cut = inputs['phi_r_cut']  # shape: (P), invariant
+            unit_r_ij = inputs['unit_r_ij']  # shape: (P,3), equivariant
+
+            x_i = x[idx_i]  # shape: (P,F)
+            x_j = x[idx_j]  # shape: (P,F)
+            # Both pair features are symmetric under i <-> j, and so are `rbf_ij`/`phi_r_cut`
+            # (functions of the scalar distance). That symmetry is what makes `sum_i h_i`
+            # vanish identically below, since `unit_r_ji = -unit_r_ij`.
+            pair_in = jnp.concatenate([x_i + x_j, x_i * x_j, rbf_ij], axis=-1)  # shape: (P,2F+K)
+            c_ij = MLP(features=[x.shape[-1], 1], activation_fn=silu)(pair_in)[:, 0]  # shape: (P)
+            c_ij = safe_scale(c_ij * phi_r_cut, scale=pair_mask)  # shape: (P)
+
+            s_pair = self.param('pair_scale', constant(self.output_scale), (1,))  # shape: (1)
+            h_pair = segment_sum(c_ij[:, None] * unit_r_ij,
+                                 segment_ids=idx_i,
+                                 num_segments=x.shape[0])  # shape: (n,3), equivariant
+            h = h + s_pair * h_pair
 
         if self.use_grad_diff:
             g = inputs[self.grad_diff_key]  # shape: (n,3), Cartesian, equivariant
@@ -205,12 +269,73 @@ class InterstateCoupling(BaseSubModule):
 
         h = safe_scale(h, scale=point_mask[:, None])  # shape: (n,3)
 
+        if self.enforce_sum_rule:
+            # Project out any net translation: a true coupling satisfies sum_i d_i = 0, because
+            # rigidly translating the molecule leaves the electronic wavefunctions unchanged.
+            # The mean is over real atoms only -- padded atoms already contribute zero above.
+            n_real = point_mask.sum()  # shape: ()
+            h = h - safe_mask(n_real > 0,
+                              fn=lambda u: h.sum(axis=0, keepdims=True) / u,
+                              operand=n_real,
+                              placeholder=0.)  # shape: (n,3)
+            h = safe_scale(h, scale=point_mask[:, None])  # shape: (n,3)
+
         return {self.nac_key: h}
 
     def __dict_repr__(self) -> Dict[str, Dict[str, Any]]:
         return {self.module_name: {'degrees': list(self.degrees),
                                    'output_scale': self.output_scale,
                                    'use_grad_diff': self.use_grad_diff,
+                                   'readout': self.readout,
+                                   'enforce_sum_rule': self.enforce_sum_rule,
+                                   'prop_keys': self.prop_keys}}
+
+
+class InterstateCouplingPotential(BaseSubModule):
+    """
+    Predicts an invariant scalar "coupling potential" `S(R)` whose gradient with respect to the
+    atomic positions is used as the (scaled) interstate coupling: `h_i = dS/dR_i`.
+
+    This is the same construction SchNet/SchNarc use for nonadiabatic couplings -- and the same
+    one `mlff` already uses for forces (`nn.get_obs_and_force_fn`) -- applied to a "virtual"
+    property that has no independent physical meaning of its own. The module itself only emits
+    the scalar; the differentiation is wired up alongside the force derivative in
+    `nn/stacknet/observable_function.py::get_obs_and_force_fn(nac_from_potential=True)`, so the
+    `nac` output key is produced there, not here.
+
+    Why it is worth trying: the resulting vector field is rotation-equivariant and
+    translation-invariant by construction (it inherits both from the invariant scalar), it has
+    the full three degrees of freedom per atom that a single-channel `chi[l=1]` readout lacks,
+    and it satisfies the translational sum rule `sum_i h_i = 0` exactly, since `S` depends on
+    the positions only through relative displacements.
+
+    The caveat is that it also *imposes* a constraint the true coupling does not obey: any
+    gradient field is curl-free in the 3N-dimensional configuration space, and the nonadiabatic
+    coupling is not exactly a gradient of a scalar. So this trades a genuine loss of generality
+    for exact symmetry and full directional freedom, and costs an extra reverse-mode pass per
+    evaluation. Whether that trade pays off is an empirical question -- hence both this and
+    `InterstateCoupling(readout='pair')` exist to be compared.
+    """
+    prop_keys: Dict
+    output_scale: float = 1.
+    module_name: str = 'nac_potential'
+
+    def setup(self):
+        self.nac_potential_key = self.prop_keys[pn.nac_potential]
+
+    @nn.compact
+    def __call__(self, inputs: Dict, *args, **kwargs):
+        x = inputs['x']  # shape: (n,F), invariant
+        point_mask = inputs['point_mask']  # shape: (n)
+
+        s_loc = MLP(features=[x.shape[-1], 1], activation_fn=silu)(x)  # shape: (n,1), invariant
+        s_loc = safe_scale(s_loc, scale=point_mask[:, None])  # shape: (n,1)
+        s = self.param('output_scale', constant(self.output_scale), (1,))  # shape: (1)
+
+        return {self.nac_potential_key: s * s_loc.sum(axis=0)}  # shape: (1)
+
+    def __dict_repr__(self) -> Dict[str, Dict[str, Any]]:
+        return {self.module_name: {'output_scale': self.output_scale,
                                    'prop_keys': self.prop_keys}}
 
 
