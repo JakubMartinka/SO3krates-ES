@@ -234,6 +234,59 @@ class AtomTypeEmbed(BaseSubModule):
                                    'prop_keys': self.prop_keys}}
 
 
+class StateEmbed(BaseSubModule):
+    """
+    Embed the electronic-state index into the invariant atomic features, which is what makes the
+    *multi-state* variant of the network multi-state: one weight-shared network is evaluated once
+    per state with the state as an input, instead of a single pass emitting all states from
+    independent output heads (`Energy`'s `n_states`, the multi-output variant).
+
+    This is the So3krates form of MS-ANI's construction (10.26434/chemrxiv-2024-dtc1w), whose
+    `StateInputNet` concatenates the state index as one extra scalar onto every atom's descriptor
+    before the element-wise MLP. Concatenating a scalar `s` and applying a dense layer is
+    `W @ descriptor + w * s`, so the equivalent here -- where the invariant features come from a
+    learned atom-type embedding rather than a hand-built descriptor -- is to add `s * w` with a
+    single learned direction `w`, shared by every atom of the structure. Consequences worth knowing:
+
+      * The state enters as a *continuous* scalar, so nothing structurally prevents asking a model
+        trained on two states for a third; whether the answer means anything is another matter.
+      * State 0 contributes exactly nothing (`s = 0`), exactly as in MS-ANI.
+      * `StackNet` sums its feature embeddings and divides by sqrt(n_embeds), so adding this module
+        also rescales the atom-type embedding by 1/sqrt(2) -- a change of feature scale only, and
+        the same for every state.
+    """
+    features: int
+    prop_keys: Dict
+    module_name: str = 'state_embed'
+
+    def setup(self):
+        self.state_key = self.prop_keys.get(pn.state)
+
+    @nn.compact
+    def __call__(self, inputs: Dict, *args, **kwargs) -> jnp.ndarray:
+        """
+        Args:
+            inputs (Dict):
+                state (Array): electronic-state index, shape: (1)
+                point_mask (Array): Mask for atom-wise operations, shape: (n)
+            *args (Tuple):
+            **kwargs (Dict):
+
+        Returns: State embedding, broadcast over atoms, shape: (n,F)
+
+        """
+        s = jnp.asarray(inputs[self.state_key], dtype=jnp.float32).reshape(-1)[0]  # shape: ()
+        point_mask = inputs['point_mask']
+
+        w = self.param('state_direction', nn.initializers.normal(stddev=1.), (self.features,))
+        x = jnp.broadcast_to(s * w[None, :], (point_mask.shape[0], self.features))  # shape: (n,F)
+        return safe_scale(x, scale=point_mask[:, None])
+
+    def __dict_repr__(self):
+        return {self.module_name: {'features': self.features,
+                                   'prop_keys': self.prop_keys}}
+
+
 class OneHotEmbed(BaseSubModule):
     prop_keys: Dict
     atomic_types: Sequence[int]

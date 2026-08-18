@@ -17,6 +17,10 @@ atomic_energy = 'atomic_energy'
 
 atomic_position = 'atomic_position'
 atomic_type = 'atomic_type'
+state = 'state'  # electronic-state index fed to the network as an input, shape (1); only used by
+                 # the multi-state variant (see nn.StateEmbed / nn.MultiStateStackNet), where one
+                 # weight-shared network is evaluated once per state, as opposed to the multi-output
+                 # variant where a single pass emits all states at once (nn.Energy's n_states)
 
 total_charge = 'total_charge'
 total_spin = 'total_spin'

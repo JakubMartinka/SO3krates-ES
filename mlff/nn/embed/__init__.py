@@ -1,5 +1,6 @@
 from .embed import (AtomTypeEmbed,
                     GeometryEmbed,
-                    OneHotEmbed
+                    OneHotEmbed,
+                    StateEmbed
                     )
 from .h_register import get_embedding_module
