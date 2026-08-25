@@ -287,6 +287,117 @@ class StateEmbed(BaseSubModule):
                                    'prop_keys': self.prop_keys}}
 
 
+def _l1_slice_of(degrees):
+    """Where the degree-1 (vector) block sits inside a concatenated SPHC vector."""
+    if 1 not in degrees:
+        raise ValueError(f"a degree-1 (vector) block is required; got degrees={degrees}")
+    n0 = list(degrees).index(1)
+    offset = sum(2 * d + 1 for d in degrees[:n0])
+    return slice(offset, offset + 3)
+
+
+# `basis_function/spherical.py`'s real l=1 harmonics are ordered (Y_1^-1, Y_1^0, Y_1^1) ~ (y,z,x),
+# a fixed permutation of Cartesian (x,y,z). `InterstateCoupling` reads chi's l=1 block out with
+# [2,0,1] to get (x,y,z); writing a Cartesian vector *into* that block needs the inverse.
+_CARTESIAN_TO_SPHC_L1 = (1, 2, 0)
+
+
+class GradDiffSPHCEmbed(BaseSubModule):
+    """
+    Add the gradient-difference vector `g_i = dE_1/dR_i - dE_0/dR_i` into the degree-1 block of the
+    SPHCs, so that the *backbone* is conditioned on it rather than only the coupling readout.
+
+    Why this exists. `InterstateCoupling(use_grad_diff=True)` consumes `g` at the very end, as one
+    more additive term `s2 * a(x_i, |g_i|) * g_i` on the predicted coupling. That can only push the
+    prediction *along* `g` -- and on this project's fulvene data the true coupling is close to
+    orthogonal to the gradient difference (median |cos| 0.08-0.17 across the three test sets;
+    random level in 3N=36 dimensions is ~0.13), so that direction is nearly useless. Measured on
+    the trained `base`/`chipair` checkpoints, the term carries 33-37% of the predicted coupling's
+    norm at |cos| 0.15-0.22 with the true target, i.e. magnitude in a near-random direction that
+    the other terms then have to cancel. Meanwhile `g` never reaches the representation at all:
+    only the scalar `|g_i|` enters that gate, and the gate multiplies only the `g` term, so the
+    pair coefficients and the chi gate are blind to it.
+
+    Feeding it into `chi` instead puts it where the network can actually use it. Every
+    `So3kratesLayer` builds its invariant pair features from l=0 contractions of `chi_i - chi_j`
+    (`d_gamma`), and the InteractionBlock mixes SPHC norms back into the invariant features `x`, so
+    after one layer the attention coefficients, the pair coefficients `c_ij` and the readout gates
+    are all functions of `g` -- through the invariants `g_i . g_j`, `g_i . r_ij`, `|g_i|` that those
+    contractions generate. That is the equivariant analogue of handing a kernel method the whole
+    gradient-difference vector as a descriptor, which on this data is worth roughly a factor of six
+    in RMSE on the coupling.
+
+    Only the *direction* goes in here: per-atom `|g_i|` spans two orders of magnitude across the
+    dataset (p10 0.07, p99 8.9 eV/Angstrom on Testset2), so adding `g` raw would let a handful of
+    near-degenerate geometries dominate `chi`. The magnitude is fed separately, and on a log scale,
+    by `GradDiffEmbed` into the invariant features. `scale` is learnable and starts small, so
+    training begins close to the model without this input and grows the term if it helps.
+    """
+    prop_keys: Dict
+    degrees: Sequence[int]
+    scale_init: float = 0.1
+    module_name: str = 'grad_diff_sphc_embed'
+
+    def setup(self):
+        self.grad_diff_key = self.prop_keys[pn.grad_diff]
+        self._l1 = _l1_slice_of(self.degrees)
+
+    @nn.compact
+    def __call__(self, inputs: Dict, *args, **kwargs) -> Dict:
+        chi = inputs['chi']  # shape: (n,m_tot), equivariant
+        point_mask = inputs['point_mask']  # shape: (n)
+        g = inputs[self.grad_diff_key]  # shape: (n,3), Cartesian, equivariant
+
+        g_norm = jnp.linalg.norm(g, axis=-1, keepdims=True)  # shape: (n,1), invariant
+        g_hat = safe_mask(mask=g_norm != 0, operand=g, fn=lambda u: u / g_norm, placeholder=0.)
+        g_hat = g_hat[:, jnp.array(_CARTESIAN_TO_SPHC_L1)]  # shape: (n,3), real-SPHC (y,z,x) order
+        g_hat = safe_scale(g_hat, scale=point_mask[:, None])
+
+        s = self.param('grad_diff_sphc_scale', nn.initializers.constant(self.scale_init), (1,))
+        chi = chi.at[:, self._l1].add(s * g_hat)
+        return {'chi': safe_scale(chi, scale=point_mask[:, None])}
+
+    def __dict_repr__(self):
+        return {self.module_name: {'degrees': list(self.degrees),
+                                   'scale_init': self.scale_init,
+                                   'prop_keys': self.prop_keys}}
+
+
+class GradDiffEmbed(BaseSubModule):
+    """
+    Embed the *magnitude* of the per-atom gradient difference `|g_i|` into the invariant atomic
+    features, the companion to `GradDiffSPHCEmbed`'s direction-only injection.
+
+    `log1p(|g_i|)` rather than `|g_i|`: the raw norm spans p10 0.07 to p99 8.9 eV/Angstrom on this
+    project's fulvene data, a factor of ~130, which is badly conditioned as a direct network input;
+    the log compresses that to ~0.07-2.3 while staying monotone and exactly 0 at `|g| = 0`.
+
+    `StackNet` sums its feature embeddings and divides by sqrt(n_embeds), so adding this module
+    also rescales the atom-type embedding -- a change of feature scale only, identical for every
+    atom, exactly as for `StateEmbed`.
+    """
+    features: int
+    prop_keys: Dict
+    module_name: str = 'grad_diff_embed'
+
+    def setup(self):
+        self.grad_diff_key = self.prop_keys[pn.grad_diff]
+
+    @nn.compact
+    def __call__(self, inputs: Dict, *args, **kwargs) -> jnp.ndarray:
+        point_mask = inputs['point_mask']  # shape: (n)
+        g = inputs[self.grad_diff_key]  # shape: (n,3)
+
+        g_norm = jnp.linalg.norm(g, axis=-1, keepdims=True)  # shape: (n,1), invariant
+        u = jnp.log1p(g_norm)  # shape: (n,1)
+        y = nn.Dense(self.features)(nn.silu(nn.Dense(self.features)(u)))  # shape: (n,F)
+        return safe_scale(y, scale=point_mask[:, None])
+
+    def __dict_repr__(self):
+        return {self.module_name: {'features': self.features,
+                                   'prop_keys': self.prop_keys}}
+
+
 class OneHotEmbed(BaseSubModule):
     prop_keys: Dict
     atomic_types: Sequence[int]

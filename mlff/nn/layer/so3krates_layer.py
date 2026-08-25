@@ -410,7 +410,10 @@ class InvariantFilter(nn.Module):
 
         """
         w = self.filter_fn(self._features, self.activation_fn)(rbf)  # shape: (...,n_heads,F_head)
-        w = w.reshape(*rbf.shape[:-1], -1)  # shape: (...,n,F)
+        # Merge the head axis explicitly rather than with `-1`: for a structure whose neighbor
+        # list is empty (n_pairs == 0) the array has zero size, and `-1` is then unresolvable
+        # (`ZeroDivisionError: integer modulo by zero` from jnp.reshape).
+        w = w.reshape(*rbf.shape[:-1], w.shape[-2] * w.shape[-1])  # shape: (...,n,F)
         return w
 
 
@@ -461,7 +464,8 @@ class RadialSphericalFilter(nn.Module):
         """
         w = self.rad_filter_fn(self._rad_features, self.activation_fn)(rbf)  # shape: (...,n_heads,F_head)
         w += self.sph_filter_fn(self._sph_features, self.activation_fn)(d_gamma)  # shape: (...,n_heads,F_head)
-        w = w.reshape(*rbf.shape[:-1], -1)  # shape: (...,n,n,F)
+        # Explicit head-merge, see the note in InvariantFilter.__call__ above.
+        w = w.reshape(*rbf.shape[:-1], w.shape[-2] * w.shape[-1])  # shape: (...,n,n,F)
         return w
 
 
@@ -609,7 +613,12 @@ class AttentionAggregation(nn.Module):
 
 
 def equal_head_split(x: jnp.ndarray, n_heads: int) -> (Callable, jnp.ndarray):
-    def inv_split(inputs):
-        return inputs.reshape(*x.shape[:-1], -1)
+    # Both reshapes spell the split/merged axis out instead of using `-1`: an empty neighbor
+    # list (n_pairs == 0) makes the array zero-sized, and `-1` is then unresolvable
+    # (`ZeroDivisionError: integer modulo by zero` from jnp.reshape).
+    f_head = x.shape[-1] // n_heads
 
-    return inv_split, x.reshape(*x.shape[:-1], n_heads, -1)
+    def inv_split(inputs):
+        return inputs.reshape(*x.shape[:-1], n_heads * f_head)
+
+    return inv_split, x.reshape(*x.shape[:-1], n_heads, f_head)

@@ -1,5 +1,7 @@
 from .embed import (AtomTypeEmbed,
                     GeometryEmbed,
+                    GradDiffEmbed,
+                    GradDiffSPHCEmbed,
                     OneHotEmbed,
                     StateEmbed
                     )

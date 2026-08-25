@@ -17,7 +17,8 @@ def init_so3krates(prop_keys: Dict[str, str],
                    embeddings: Sequence[nn.Module] = None,
                    obs: Sequence[nn.Module] = None,
                    so3krates_layer_kwargs: Dict = None,
-                   geometry_embed_kwargs: Dict = None):
+                   geometry_embed_kwargs: Dict = None,
+                   extra_geometry_embeddings: Sequence[nn.Module] = None):
 
     layer_arguments = _default_layer_arguments(F=F)
     if so3krates_layer_kwargs is not None:
@@ -40,7 +41,9 @@ def init_so3krates(prop_keys: Dict[str, str],
     if obs is None:
         obs = [Energy(prop_keys=prop_keys)]
 
-    net = StackNet(geometry_embeddings=[geometry_embedding],
+    # Extra geometry embeddings run after `GeometryEmbed` and may update the quantities it
+    # produced -- `GradDiffSPHCEmbed` adds the gradient-difference direction into `chi`.
+    net = StackNet(geometry_embeddings=[geometry_embedding, *(extra_geometry_embeddings or [])],
                    feature_embeddings=embeddings,
                    layers=so3krates_layer,
                    observables=obs,

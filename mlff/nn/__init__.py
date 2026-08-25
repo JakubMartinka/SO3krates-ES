@@ -12,6 +12,8 @@ from .stacknet import (MultiStateStackNet,
 
 from .embed import (AtomTypeEmbed,
                     GeometryEmbed,
+                    GradDiffEmbed,
+                    GradDiffSPHCEmbed,
                     StateEmbed)
 
 from .observable import (Energy,

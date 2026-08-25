@@ -1,6 +1,8 @@
 from typing import Dict
 from .embed import (AtomTypeEmbed,
                     GeometryEmbed,
+                    GradDiffEmbed,
+                    GradDiffSPHCEmbed,
                     OneHotEmbed,
                     StateEmbed
                     )
@@ -15,6 +17,10 @@ def get_embedding_module(name: str, h: Dict):
         return OneHotEmbed(**h)
     elif name == 'state_embed':
         return StateEmbed(**h)
+    elif name == 'grad_diff_sphc_embed':
+        return GradDiffSPHCEmbed(**h)
+    elif name == 'grad_diff_embed':
+        return GradDiffEmbed(**h)
     else:
         msg = "No embedding module implemented for `module_name={}`".format(name)
         raise ValueError(msg)
