@@ -60,6 +60,24 @@ def test_gap_loss_term_is_noop_for_single_state():
     np.testing.assert_allclose(loss_gap, loss_plain)
 
 
+def test_loss_rejects_shape_mismatch():
+    # A single-state force prediction (B, n, 3) against a target that kept its state axis,
+    # (B, 1, n, 3), would otherwise broadcast to (B, B, n, 3) and silently never be learned.
+    import jax.numpy as jnp
+    from mlff.training import get_loss_fn
+    from mlff.properties import md17_property_keys as prop_keys
+    import mlff.properties.property_names as pn
+
+    f_key = prop_keys[pn.force]
+    obs_fn = lambda params, inputs: {f_key: params}
+    inputs = {prop_keys[pn.node_mask]: jnp.ones((4, 5), dtype=bool)}
+    loss_fn = get_loss_fn(obs_fn, {pn.force: 1.}, prop_keys)
+
+    loss_fn(jnp.zeros((4, 5, 3)), (inputs, {f_key: jnp.ones((4, 5, 3))}))  # matching: fine
+    with pytest.raises(ValueError, match='does not match'):
+        loss_fn(jnp.zeros((4, 5, 3)), (inputs, {f_key: jnp.ones((4, 1, 5, 3))}))
+
+
 def _build(variant, n_states, F=32):
     from mlff import nn
     from mlff.properties import md17_property_keys as prop_keys

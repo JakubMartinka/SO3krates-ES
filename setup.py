@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="mlff",
-    version="0.4.1",
+    version="0.4.2",
     description="Build Neural Networks for Force Fields with JAX",
     python_requires=">=3.9",
     packages=find_packages(),

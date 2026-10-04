@@ -149,6 +149,12 @@ def get_loss_fn(obs_fn: Callable,
         loss = jnp.zeros(1)
         train_metrics = {}
         for name, target in targets.items():  # name is the value in prop_keys
+            # Shapes are static under jit, so this costs nothing at run time. Without it a
+            # mismatch such as (B, n, 3) against (B, 1, n, 3) silently broadcasts to (B, B, n, 3),
+            # comparing every example with every other, and the property is never learned.
+            if outputs[name].shape != target.shape:
+                raise ValueError(f'Shape of the prediction for {name!r} {tuple(outputs[name].shape)} '
+                                 f'does not match its target {tuple(target.shape)}.')
             msk = _masks[name](inputs[prop_keys[pn.node_mask]], targets[name].ndim)
             _weighted = name in _sample_weighted_keys
             if name in _sign_invariant_keys:

@@ -9,6 +9,7 @@ keeps working as before; single-state models and checkpoints are unchanged.
 
 | Version | Content |
 |---|---|
+| `v0.4.2-pes` | Training fails loudly on a prediction/target shape mismatch instead of silently not learning |
 | `v0.4.1-pes` | Pinned dependencies, installable next to MLatom |
 | `v0.4.0-pes` | Multi-state PESs complete: single-state, multi-output and multi-state models |
 
@@ -19,7 +20,7 @@ newer releases break this code.
 
 Install a tagged release directly from GitHub (CPU):
 ```
-pip install "git+https://github.com/JakubMartinka/SO3krates-ES@v0.4.1-pes"
+pip install "git+https://github.com/JakubMartinka/SO3krates-ES@v0.4.2-pes"
 ```
 or, for development, from a clone:
 ```
@@ -35,7 +36,7 @@ So3krates is an optional MLatom backend, installed the same way as MACE: install
 package on top of it, in the same environment:
 ```
 pip install mlatom
-pip install "git+https://github.com/JakubMartinka/SO3krates-ES@v0.4.1-pes"
+pip install "git+https://github.com/JakubMartinka/SO3krates-ES@v0.4.2-pes"
 ```
 then `ml.models.so3krates(...)`. The two coexist with MLatom's `numpy<2` (this package caps `ml_dtypes`
 so that installing it does not upgrade numpy).
