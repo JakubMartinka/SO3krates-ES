@@ -4,7 +4,7 @@ import numpy as np
 
 import flax.linen as nn
 
-import pkg_resources
+import os
 import pickle
 import itertools as it
 
@@ -16,8 +16,7 @@ indx_fn = lambda x: int((x+1)**2) if x >= 0 else 0
 
 
 def load_cgmatrix():
-    stream = pkg_resources.resource_stream(__name__, 'cgmatrix.npz')
-    return np.load(stream)['cg']
+    return np.load(os.path.join(os.path.dirname(__file__), 'cgmatrix.npz'))['cg']
 
 
 def init_clebsch_gordan_matrix(degrees, l_out_max=None):
@@ -192,8 +191,8 @@ def make_l0_contraction_fn(degrees, dtype=jnp.float32):
 
 def load_u_matrix():
 
-    stream = pkg_resources.resource_stream(__name__, 'u_matrix.pickle')
-    return pickle.load(stream)
+    with open(os.path.join(os.path.dirname(__file__), 'u_matrix.pickle'), 'rb') as f:
+        return pickle.load(f)
 
 
 def degrees_to_str(x):
