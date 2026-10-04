@@ -57,22 +57,22 @@ class Coach:
         else:
             stop_metric_fn = None
 
-        run_training(state=train_state,
-                     loss_fn=loss_fn,
-                     metric_fn=metric_fn,
-                     train_ds=train_ds,
-                     valid_ds=valid_ds,
-                     epochs=self.epochs,
-                     train_bs=self.training_batch_size,
-                     valid_bs=self.validation_batch_size,
-                     ckpt_dir=self.ckpt_dir,
-                     ckpt_manager_options=ckpt_manager_options,
-                     stop_lr_fn=stop_lr_fn,
-                     stop_metric_fn=stop_metric_fn,
-                     seed=self.training_seed,
-                     use_wandb=use_wandb,
-                     **kwargs
-                     )
+        return run_training(state=train_state,
+                            loss_fn=loss_fn,
+                            metric_fn=metric_fn,
+                            train_ds=train_ds,
+                            valid_ds=valid_ds,
+                            epochs=self.epochs,
+                            train_bs=self.training_batch_size,
+                            valid_bs=self.validation_batch_size,
+                            ckpt_dir=self.ckpt_dir,
+                            ckpt_manager_options=ckpt_manager_options,
+                            stop_lr_fn=stop_lr_fn,
+                            stop_metric_fn=stop_metric_fn,
+                            seed=self.training_seed,
+                            use_wandb=use_wandb,
+                            **kwargs
+                            )
 
     def __dict_repr__(self):
         return {'coach': {'inputs': self.inputs,

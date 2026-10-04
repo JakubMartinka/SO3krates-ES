@@ -153,8 +153,11 @@ def run_training(state: TrainState,
         seed (int): Random seed.
         use_wandb (bool): Log statistics to WeightsAndBias.
     Returns:
+        bool: True if training was ended by `stop_lr_fn` or `stop_metric_fn`, False if it ran for all
+            `epochs`.
     """
     rng = jax.random.PRNGKey(seed)
+    stopped_early = False
 
     if metric_fn is None:
         metric_fn = loss_fn
@@ -271,12 +274,11 @@ def run_training(state: TrainState,
             if stop_metric_fn is not None:
                 if stop_metric_fn(valid_batch_metrics_np):
                     logging.info(f'Stopping criteria for metrics has been met for step {i}.')
-                    # mngr.save() above is async (AsyncCheckpointer) -- without waiting for it to
-                    # finish, exit() raises SystemExit and unwinds past the mngr.wait_until_finished()
-                    # call at the end of this function, so a caller catching SystemExit and
-                    # immediately reloading the checkpoint can race an incomplete/partial write.
-                    mngr.wait_until_finished()
-                    exit()
+                    # Leave the loop rather than exit(): the mngr.wait_until_finished() below then
+                    # flushes the async checkpoint write before returning, so a caller can reload
+                    # the best checkpoint straight away.
+                    stopped_early = True
+                    break
 
         epoch_end = time.time()
 
@@ -314,11 +316,11 @@ def run_training(state: TrainState,
             if stop_lr_fn is not None:
                 if stop_lr_fn(abs(lr)):
                     logging.info(f'Stopping criteria for learning rate has been met for step {i}.')
-                    # see the matching comment above stop_metric_fn's exit() -- same race.
-                    mngr.wait_until_finished()
-                    exit()
+                    stopped_early = True
+                    break
 
             if (i > 1) and (i % log_every_t == 0):
                 if use_wandb:
                     wandb.log(times, step=i)
     mngr.wait_until_finished()
+    return stopped_early
