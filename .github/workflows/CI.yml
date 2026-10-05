@@ -31,12 +31,12 @@ jobs:
           path: ${{ steps.pip-cache.outputs.dir }}
           key: ${{ runner.os }}-pip-${{ hashFiles('**/setup.py') }}
 
+      # setup.py pins the JAX stack; pytest comes with the `test` extra.
       - name: Install dependencies
         run: |
-          pip install "jax==0.4.28" "jaxlib==0.4.28" "flax==0.8.5" "optax==0.2.2" tensorflow
+          pip install -e ".[test]"
 
       - name: Test with pytest
         run: |
-          pip install -e .
           pytest tests/
       
