@@ -9,9 +9,7 @@ keeps working as before; single-state models and checkpoints are unchanged.
 
 | Version | Content |
 |---|---|
-| `v0.4.2-pes` | Training fails loudly on a prediction/target shape mismatch instead of silently not learning |
-| `v0.4.1-pes` | Pinned dependencies, installable next to MLatom |
-| `v0.4.0-pes` | Multi-state PESs complete: single-state, multi-output and multi-state models |
+| `v0.4.3-pes` | Multi-state PESs: single-state, multi-output and multi-state models; one pooled per-element energy shift for all states (`--shift_by lse`); the multi-state variant takes the raw state index at the energy head (`nn.StateInputEnergy`); pinned dependencies, installable next to MLatom |
 
 Nonadiabatic coupling (NAC) prediction is included but **experimental**.
 ## Installation
@@ -20,7 +18,7 @@ newer releases break this code.
 
 Install a tagged release directly from GitHub (CPU):
 ```
-pip install "git+https://github.com/JakubMartinka/SO3krates-ES@v0.4.2-pes"
+pip install "git+https://github.com/JakubMartinka/SO3krates-ES@v0.4.3-pes"
 ```
 or, for development, from a clone:
 ```
@@ -36,7 +34,7 @@ So3krates is an optional MLatom backend, installed the same way as MACE: install
 package on top of it, in the same environment:
 ```
 pip install mlatom
-pip install "git+https://github.com/JakubMartinka/SO3krates-ES@v0.4.2-pes"
+pip install "git+https://github.com/JakubMartinka/SO3krates-ES@v0.4.3-pes"
 ```
 then `ml.models.so3krates(...)`. The two coexist with MLatom's `numpy<2` (this package caps `ml_dtypes`
 so that installing it does not upgrade numpy).
@@ -197,8 +195,14 @@ However, it might be desired to use atom type specific shifts, which is possible
 train_so3krates --ckpt_dir energy_shift_module --data_file atoms.xyz --n_train 1000 --n_valid 200 --shift_by atomic_number --shifts 1=-500.30,6=-6000.25
 ```
 and would shift the energy by `-500.30` for each hydrogen in the structure and by `-6000.25` for each carbon.
-`--shift_by lse` fits the per-type shifts by least squares instead. Multi-state models support only the
-default `--shift_by mean`, which shifts each state by its own mean.
+`--shift_by lse` fits the per-type shifts by least squares instead.
+
+For multi-state models, use `--shift_by lse`: it fits **one** set of per-element energies over the energies of all
+states pooled and subtracts it from every state, so the shift cancels in every gap and the training gaps stay as
+computed (the approach of MS-ANI and the other multi-state models we compare against). The default `--shift_by mean`
+shifts each state by its own mean instead, which changes every gap by an amount that grows with the number of atoms;
+it is harmless for a data set of a single molecule, but not for one that mixes molecule sizes. `--shift_by
+atomic_number` applies the given per-element shifts to every state.
 ### `So3krates` Hyperparameters
 One can further vary different model hyperparameters: `--L` sets the number of message passing steps, `--F` sets the
 feature dimension, `--degrees` sets the degrees for spherical harmonic coordinates and `--r_cut` sets the cutoff for the 
@@ -247,16 +251,21 @@ variants:
 |---|---|---|
 | single-state | one energy, as in the original package (`n_states = 1`) | 1 pass |
 | multi-output | one network with `n_states` energy heads on a shared backbone (`nn.Energy(n_states=N)`) | 1 pass |
-| multi-state | one weight-shared network that takes the state index as an input (`nn.StateEmbed`), evaluated once per state (`nn.MultiStateStackNet`); the So3krates form of MS-ANI ([10.26434/chemrxiv-2024-dtc1w](https://doi.org/10.26434/chemrxiv-2024-dtc1w)) | `n_states` passes |
+| multi-state | the state index is an input: appended as it is to every atom's descriptor (its final invariant features), read by one energy head shared by all states (`nn.StateInputEnergy`), as MS-ANI ([10.26434/chemrxiv-2024-dtc1w](https://doi.org/10.26434/chemrxiv-2024-dtc1w)) and MS-NequIP do | 1 pass of the layers, the small head once per state |
 
 Both multi-state variants return energies of shape `(n_states,)` and, from one `jax.jacrev`, forces of shape
-`(n_states, n, 3)`, so the loss, the energy shift and the evaluation do not depend on the variant. Each state's
-energy is shifted by its own training-set mean. An optional loss term on the gaps between adjacent states
-(`get_loss_fn(..., gap_weight=...)`) supervises the gaps directly, which matters for nonadiabatic dynamics.
+`(n_states, n, 3)`, so the loss, the energy shift and the evaluation do not depend on the variant. Use one energy
+shift shared by all states (`--shift_by lse`, see [Energy Shifts](#energy-shifts)). An optional loss term on the gaps
+between adjacent states (`get_loss_fn(..., gap_weight=...)`) supervises the gaps directly, which matters for
+nonadiabatic dynamics.
 
-* **Command line:** `train_so3krates --n_states N` trains the multi-output variant from an `*.npz` file with the
-  multi-state shapes listed under [Input Data Files](#input-data-files) (ASE formats have no multi-state convention).
-  Not supported together with `stress`.
+Multi-state checkpoints written before `v0.4.3-pes` use the earlier construction, a learned state embedding at the
+input (`nn.StateEmbed`) evaluated once per state (`nn.MultiStateStackNet`); both are kept, so those checkpoints still
+load and predict as before.
+
+* **Command line:** `train_so3krates --n_states N --shift_by lse` trains the multi-output variant from an `*.npz`
+  file with the multi-state shapes listed under [Input Data Files](#input-data-files) (ASE formats have no
+  multi-state convention). Not supported together with `stress`.
 * **MLatom:** all three variants, selected with `ml.models.so3krates(nstates=N, hyperparameters={'state_variant':
   'multi_output'})` or `'multi_state'`. This is the recommended way to train and use multi-state models; it handles
   the data conversion, the gap loss (on by default) and reloading the right variant from a checkpoint.

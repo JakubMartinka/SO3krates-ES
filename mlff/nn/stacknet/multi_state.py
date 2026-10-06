@@ -10,6 +10,11 @@ StackNet = Any
 
 class MultiStateStackNet:
     """
+    **Superseded by `nn.StateInputEnergy`**, with which the So3krates layers are state-independent
+    and run once per structure, so no per-state wrapper is needed. Kept so that multi-state
+    checkpoints built with `nn.StateEmbed` still load and predict as before; it is only needed for
+    those.
+
     Evaluate a state-conditioned `StackNet` once per electronic state and stack the results, so a
     *multi-state* model presents exactly the same interface -- and the same output shapes -- as the
     *multi-output* one.

@@ -1,6 +1,6 @@
 """
 End-to-end checks of the three PES variants -- single-state, multi-output (`nn.Energy(n_states=N)`)
-and multi-state (`nn.StateEmbed` + `nn.MultiStateStackNet`) -- plus the `gap_weight` loss term and
+and multi-state (`nn.StateInputEnergy`: the raw state index appended to the descriptor at the energy head) -- plus the `gap_weight` loss term and
 the early-stopping return value of `Coach.run`.
 """
 import pytest
@@ -84,17 +84,18 @@ def _build(variant, n_states, F=32):
 
     embeddings = [nn.AtomTypeEmbed(num_embeddings=100, features=F, prop_keys=prop_keys)]
     if variant == 'multi_state':
-        embeddings.append(nn.StateEmbed(features=F, prop_keys=prop_keys))
-    n_heads = n_states if variant == 'multi_output' else 1
+        obs = [nn.StateInputEnergy(prop_keys=prop_keys, n_states=n_states)]
+    else:
+        obs = [nn.Energy(prop_keys=prop_keys, n_states=n_states)]
     net = nn.So3krates(F=F,
                        n_layer=2,
                        prop_keys=prop_keys,
                        embeddings=embeddings,
-                       obs=[nn.Energy(prop_keys=prop_keys, n_states=n_heads)],
+                       obs=obs,
                        geometry_embed_kwargs={'degrees': [1, 2]},
                        so3krates_layer_kwargs={'n_heads': 1, 'degrees': [1, 2]})
-    model = nn.MultiStateStackNet(net, n_states=n_states) if variant == 'multi_state' else net
-    return net, model
+    # Both variants are a plain StackNet now: the state enters at the head, so nothing is wrapped.
+    return net, net
 
 
 @pytest.mark.parametrize('variant,n_states,stop_early', [('single_state', 1, True),
@@ -109,7 +110,7 @@ def test_train_reload_predict(tmp_path, variant, n_states, stop_early):
     from mlff.io import bundle_dicts, save_dict, read_json, load_params_from_ckpt_dir
     from mlff.training import Coach, Optimizer, get_loss_fn, create_train_state
     from mlff.data import DataTuple, DataSet
-    from mlff.nn import get_obs_and_force_fn, MultiStateStackNet
+    from mlff.nn import get_obs_and_force_fn
     from mlff.nn.stacknet import init_stack_net
     from mlff.properties import md17_property_keys as prop_keys
     import mlff.properties.property_names as pn
@@ -128,7 +129,10 @@ def test_train_reload_predict(tmp_path, variant, n_states, stop_early):
 
     data_set = DataSet(data=data, prop_keys=prop_keys)
     data_set.random_split(n_train=20, n_valid=4, n_test=None, r_cut=5, training=True, seed=0)
-    data_set.shift_x_by_mean_x(x=pn.energy)
+    if n_states > 1:
+        data_set.shift_x_by_type(x=pn.energy)  # pooled per-element fit, shared by all states
+    else:
+        data_set.shift_x_by_mean_x(x=pn.energy)
     d = data_set.get_data_split()
 
     net, model = _build(variant, n_states)
@@ -176,8 +180,7 @@ def test_train_reload_predict(tmp_path, variant, n_states, stop_early):
     # Reload straight away: after an early stop the checkpoint must already be flushed to disk.
     params = load_params_from_ckpt_dir(ckpt_dir)
     net_reloaded = init_stack_net(read_json(os.path.join(ckpt_dir, 'hyperparameters.json')))
-    model_reloaded = (MultiStateStackNet(net_reloaded, n_states=n_states)
-                      if variant == 'multi_state' else net_reloaded)
+    model_reloaded = net_reloaded  # self-describing: the multi-state head carries n_states
 
     # Batched and jitted, the way both training and the mlatom interface call it.
     batch = jax.tree_map(lambda x: jnp.array(x[:3, ...]), train_ds[0])

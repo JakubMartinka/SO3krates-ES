@@ -351,73 +351,82 @@ class DataSet:
         else:
             self.shift_x_by_type_lse(x)
 
+    def _subtract_per_structure_shift(self, x_key, z_key, shifts_arr):
+        """
+        Subtract `sum_i shifts_arr[z_i]` (padding, z = 0, contributes nothing) from `x` in the train,
+        valid and test splits. For a multi-state target, shape (n_data, n_states), the same value is
+        subtracted from every state, so the shift cancels in every gap.
+        """
+        for split in ('train', 'valid', 'test'):
+            q = self.data_split[split][x_key]
+            per_structure = np.take(shifts_arr, self.data_split[split][z_key].astype(int)).sum(axis=-1)
+            self.data_split[split][x_key] = q - per_structure.reshape((-1,) + (1,) * (q.ndim - 1))
+
+    @staticmethod
+    def _per_atom_shift_layout(shifts_arr, n_states):
+        """
+        Single-state: the 1-D array as is. Multi-state: 101 rows (atomic number) x n_states, with
+        identical columns -- the layout `shift_x_by_mean_x` uses for multi-state targets, which
+        everything that adds the shift back (mlff_eval, the MLatom interface) already understands.
+        """
+        if n_states == 1:
+            return shifts_arr.reshape(-1).tolist()
+        table = np.zeros(101)
+        table[:len(shifts_arr)] = shifts_arr
+        return np.repeat(table[:, None], n_states, axis=1).tolist()
+
     def shift_x_by_type_hand(self, x, shifts: Dict[int, float]):
+        """
+        Subtract given per-element shifts. For a multi-state target the same shifts apply to every
+        state.
+        """
         if x in self.track_shift_x_by_type:
             logging.warning(f'You already called `shift_x_by_type` for `x={x}`. It is not shifted again.')
         else:
             x_key = self.prop_keys[x]
             z_key = self.prop_keys[pn.atomic_type]
-
-            if self.data_split['train'][x_key].shape[-1] > 1:
-                raise NotImplementedError(
-                    'shift_x_by_type is not yet implemented for multi-state energies (n_states > 1). '
-                    'Use shift_by="mean" instead.'
-                )
+            q = self.data_split['train'][x_key]
+            n_states = q.shape[-1] if q.ndim > 1 else 1
 
             shifts_arr = np.zeros(int(max(list(shifts.keys()))) + 1)
             for k, v in shifts.items():
                 shifts_arr[k] = v
 
-            def apply_shifts(q, _z):
-                q_scaled = q - np.take(shifts_arr, _z).sum(axis=-1)
-                return q_scaled
-
-            self.data_split['train'][x_key] = apply_shifts(self.data_split['train'][x_key].reshape(-1),
-                                                           self.data_split['train'][z_key]).reshape(
-                self.data_split['train'][x_key].shape)
-
-            self.data_split['valid'][x_key] = apply_shifts(self.data_split['valid'][x_key].reshape(-1),
-                                                           self.data_split['valid'][z_key]).reshape(
-                self.data_split['valid'][x_key].shape)
-            self.data_split['test'][x_key] = apply_shifts(self.data_split['test'][x_key].reshape(-1),
-                                                          self.data_split['test'][z_key]).reshape(
-                self.data_split['test'][x_key].shape)
-
-            self.scales[x]['per_atom_shift'] = shifts_arr.reshape(-1).tolist()
+            self._subtract_per_structure_shift(x_key, z_key, shifts_arr)
+            self.scales[x]['per_atom_shift'] = self._per_atom_shift_layout(shifts_arr, n_states)
             self.track_shift_x_by_type += [x]
 
     def shift_x_by_type_lse(self, x):
+        """
+        Fit per-element shifts (atomic self-energies) by least squares on the training split and
+        subtract them. For a multi-state target the energies of all states are pooled into one fit
+        -- one shared set of self-energies, as in MS-ANI (torchani's EnergyShifter) -- instead of a
+        shift per state, so the shift cancels in every gap and the training gaps stay as computed.
+        A per-state mean (`shift_x_by_mean_x`) would instead change each gap by
+        N * (mean_1 - mean_0) / N_max for a structure with N atoms, a size-dependent term that is
+        not in the reference data.
+
+        Every (structure, state) energy is one equation in the structure's element counts. With
+        every state present for every structure this is the same as fitting the per-structure
+        mean over states, which is what is solved. For a single composition only the total per
+        structure is determined, and `np.linalg.lstsq` returns the minimum-norm split of it.
+        """
         if x in self.track_shift_x_by_type:
             logging.warning(f'You already called `shift_x_by_type` for `x={x}`. It is not shifted again.')
         else:
             x_key = self.prop_keys[x]
             z_key = self.prop_keys[pn.atomic_type]
+            q = self.data_split['train'][x_key]
+            n_states = q.shape[-1] if q.ndim > 1 else 1
+            if not np.all(np.isfinite(q)):
+                raise ValueError(f'shift_x_by_type_lse needs finite `{x}` labels in the training split; '
+                                 f'missing (NaN) labels would need a masked fit.')
 
-            if self.data_split['train'][x_key].shape[-1] > 1:
-                raise NotImplementedError(
-                    'shift_x_by_type is not yet implemented for multi-state energies (n_states > 1). '
-                    'Use shift_by="mean" instead.'
-                )
+            q_mean = q.reshape(len(q), -1).mean(axis=-1)  # per structure, over states: (n_data)
+            shifts, _ = get_per_atom_shift(z=self.data_split['train'][z_key], q=q_mean, pad_value=0)
 
-            z = self.data_split['train'][z_key]
-
-            shifts, x_shift_lse = get_per_atom_shift(z=z,
-                                                     q=self.data_split['train'][x_key].reshape(-1),
-                                                     pad_value=0)
-
-            def apply_shifts(q, _z):
-                q_scaled = q - np.take(shifts, _z).sum(axis=-1)
-                return q_scaled
-
-            self.data_split['train'][x_key] = x_shift_lse.reshape(self.data_split['train'][x_key].shape)
-            self.data_split['valid'][x_key] = apply_shifts(self.data_split['valid'][x_key].reshape(-1),
-                                                           self.data_split['valid'][z_key]).reshape(
-                self.data_split['valid'][x_key].shape)
-            self.data_split['test'][x_key] = apply_shifts(self.data_split['test'][x_key].reshape(-1),
-                                                          self.data_split['test'][z_key]).reshape(
-                self.data_split['test'][x_key].shape)
-
-            self.scales[x]['per_atom_shift'] = shifts.reshape(-1).tolist()
+            self._subtract_per_structure_shift(x_key, z_key, shifts)
+            self.scales[x]['per_atom_shift'] = self._per_atom_shift_layout(shifts, n_states)
             self.track_shift_x_by_type += [x]
 
     def get_data_split(self):

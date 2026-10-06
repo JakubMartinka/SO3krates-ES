@@ -236,6 +236,10 @@ class AtomTypeEmbed(BaseSubModule):
 
 class StateEmbed(BaseSubModule):
     """
+    **Superseded by `nn.StateInputEnergy`** (the raw state index appended to the descriptor at the
+    energy head, as in MS-ANI and MS-NequIP), which new multi-state models use. Kept so that
+    checkpoints written with it still load and predict as before.
+
     Embed the electronic-state index into the invariant atomic features, which is what makes the
     *multi-state* variant of the network multi-state: one weight-shared network is evaluated once
     per state with the state as an input, instead of a single pass emitting all states from

@@ -26,6 +26,8 @@ def switching_fn(x, x_on, x_off):
 def get_observable_module(name, h):
     if name == 'energy':
         return Energy(**h)
+    elif name == 'state_input_energy':
+        return StateInputEnergy(**h)
     elif name == 'nac':
         return InterstateCoupling(**h)
     elif name == 'nac_potential':
@@ -116,6 +118,58 @@ class Energy(BaseSubModule):
                                    'n_states': self.n_states,
                                    'prop_keys': self.prop_keys}
                 }
+
+
+class StateInputEnergy(Energy):
+    """
+    Energy head of the *multi-state* variant: the electronic-state index is an input to the head,
+    appended as it is to every atom's descriptor. For each state `s = 0, ..., n_states - 1` one
+    per-atom MLP -- the same weights for every state -- reads `[x_i | s]`, the final invariant
+    features of the So3krates layers with the raw state index as one extra float (no scaling, no
+    embedding), and the per-atom outputs are summed per state.
+
+    This is how the other multi-state models in our comparison take the state: MS-ANI appends the
+    raw index to each atom's AEV, MS-NequIP to each atom's final scalar features. In So3krates the
+    descriptor is `x_i` after the last layer. Because the state enters only here, the So3krates
+    layers are state-independent and run once per structure; only this head runs once per state.
+
+    Same fields as `Energy`, and the same output shapes as the multi-output `Energy(n_states=N)`:
+    energy (n_states,) per structure, (n, n_states) per atom, so forces from `jax.jacrev`, the loss
+    and the energy shift work unchanged. `per_atom_scale`/`per_atom_shift` are applied as in
+    `Energy`, and ZBL repulsion, which does not depend on the state, is added to every state. The
+    parameter count does not depend on `n_states`.
+
+    Supersedes `StateEmbed` + `MultiStateStackNet` (a learned state embedding at the input and one
+    full pass per state), which are kept so that checkpoints written with them still load.
+    """
+    module_name: str = 'state_input_energy'
+
+    @nn.compact
+    def __call__(self, inputs: Dict, *args, **kwargs):
+        x = inputs['x']  # shape: (n,F)
+        point_mask = inputs['point_mask']
+        z = inputs[self.atomic_type_key].astype(jnp.int16)
+
+        head = MLP(features=[x.shape[-1], 1], activation_fn=silu)  # one set of weights for all states
+        e_loc = jnp.concatenate(
+            [head(jnp.concatenate([x, jnp.full((x.shape[0], 1), float(s), dtype=x.dtype)], axis=-1))
+             for s in range(self.n_states)], axis=-1)  # shape: (n,n_states)
+        e_loc = self.get_per_atom_scale(z) * e_loc + self.get_per_atom_shift(z)  # shape: (n,n_states)
+        e_loc = safe_scale(e_loc, scale=point_mask[:, None])  # shape: (n,n_states)
+
+        if self.zbl_repulsion:
+            e_rep = ZBLRepulsion(prop_keys=self.prop_keys,
+                                 output_convention=self.output_convention)(inputs)  # shape: (n,1) or (1)
+            e_rep = e_rep - jnp.asarray(self.zbl_repulsion_shift, dtype=e_rep.dtype)
+        else:
+            e_rep = jnp.asarray(0., dtype=e_loc.dtype)  # shape: (1)
+
+        if self.output_convention == 'per_atom':
+            return {self.atomic_energy_key: e_loc + e_rep}  # shape: (n,n_states)
+        elif self.output_convention == 'per_structure':
+            return {self.energy_key: e_loc.sum(axis=0) + e_rep}  # shape: (n_states)
+        else:
+            raise ValueError(f"{self.output_convention} is invalid argument for attribute `output_convention`.")
 
 
 class InterstateCoupling(BaseSubModule):
