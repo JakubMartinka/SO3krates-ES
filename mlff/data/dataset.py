@@ -379,6 +379,9 @@ class DataSet:
             self.data_split['valid'][x_key] = apply_shifts(self.data_split['valid'][x_key].reshape(-1),
                                                            self.data_split['valid'][z_key]).reshape(
                 self.data_split['valid'][x_key].shape)
+            self.data_split['test'][x_key] = apply_shifts(self.data_split['test'][x_key].reshape(-1),
+                                                          self.data_split['test'][z_key]).reshape(
+                self.data_split['test'][x_key].shape)
 
             self.scales[x]['per_atom_shift'] = shifts_arr.reshape(-1).tolist()
             self.track_shift_x_by_type += [x]
@@ -410,6 +413,9 @@ class DataSet:
             self.data_split['valid'][x_key] = apply_shifts(self.data_split['valid'][x_key].reshape(-1),
                                                            self.data_split['valid'][z_key]).reshape(
                 self.data_split['valid'][x_key].shape)
+            self.data_split['test'][x_key] = apply_shifts(self.data_split['test'][x_key].reshape(-1),
+                                                          self.data_split['test'][z_key]).reshape(
+                self.data_split['test'][x_key].shape)
 
             self.scales[x]['per_atom_shift'] = shifts.reshape(-1).tolist()
             self.track_shift_x_by_type += [x]
